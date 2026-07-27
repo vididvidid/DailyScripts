@@ -2,23 +2,17 @@
  * File: youtubenotes.js
  * Author: vididvidid 
  * Created: 2026-07-27 22:31:14
+ *
+ * versions: 
+ * 0.1.0          notes Ui box below video and shorts
+ *                global display of notes over video thumnail
  */
 
-// ==UserScript==
-// @name         YouTube Personal Notes (Watched Memory)
-// @namespace    https://local.userscripts/yt-personal-notes
-// @version      1.1.0
-// @description  Write a permanent personal note on any YouTube video/Short. Notes auto-save and show on every thumbnail everywhere on YouTube (home, search, related, channel, subs, history, playlists, shorts shelves).
-// @author       you
-// @match        https://www.youtube.com/*
-// @match        https://m.youtube.com/*
-// @icon         https://www.youtube.com/s/desktop/512d15a2/img/favicon_32.png
-// @grant        none
-// @run-at       document-idle
-// ==/UserScript==
 
 (function () {
   'use strict';
+
+  console.log(" AIUtils WSL Link Working! Timestamp: " + Date.now());
 
   /* ============================================================
    * CONFIG
