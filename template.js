@@ -2,6 +2,12 @@
  * File: template.js
  * Author: vididvidid 
  * Created: 2026-07-27 22:57:32
+ *
+ * Pre-requisite:
+ * - in chrome://extensions -> go to tampermonkey -> allow access to file URIs
+ * - tampermonkey extension -> dashboard -> setting 
+ *                -> config mode = advanced
+ *                -> externals = always
  */
 
 // ==UserScript==
