@@ -818,7 +818,7 @@
         deriveTitleFallback(title, messages) {
             if (title !== Config.DEFAULT_CHAT_TITLE || messages.length === 0 || messages[0].author !== "user") return title;
             const words = messages[0].contentText.split(/\s+/).filter((w) => w.length > 0);
-            i(words.length === 0) return title;
+            if (words.length === 0) return title;
             const slice = words.length > 1 && words.slice(0, 7).join(" ").length < 5 ? words.slice(0, 10) : words.slice(0, 7);
             return slice.join(" ").replace(/[,.;:!?\-+]$/, "").trim() || title;
         },
