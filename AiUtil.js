@@ -90,7 +90,10 @@
     PARAGRAPH_FILTER_PARENT_NODES: ["TH", "TR"],
   };
 
-  /** Small typed wrapper around GM_getValue/GM_setValue so callers never touch GM_* directly. */
+  /**
+   * Small typed wrapper around GM_getValue/GM_setValue so callers never touch
+   * GM_* directly.
+   */
   const Store = {
     get: (key, fallback) => GM_getValue(key, fallback),
     set: (key, value) => GM_setValue(key, value),
@@ -147,7 +150,7 @@
                     background: ${t.railGradient};
                     border-radius: 14px;
                     box-shadow: ${t.shadow};
-                    border: 2px solid ${t.borderSoft};
+                    border: none;
                     position: relative;
                     transition: border-radius 0.2s, padding 0.2s, width 0.2s;
                 }
@@ -212,11 +215,16 @@
                     padding: 8px 10px;
                     font-size: 11px;
                     color: ${t.textLight};
-                    white-space: nowrap;
+                    white-space: normal;
+                    max-width: 50ch;
                     box-shadow: ${t.shadow};
                     display: none;
                     z-index: 2147483001;
                     pointer-events: none;
+                }
+                #${Config.DOM.PANEL_ID}.on-left .ai-exporter-tooltip {
+                    right: auto;
+                    left: calc(100% + 12px);
                 }
                 .ai-exporter-rail-btn:hover .ai-exporter-tooltip { display: block; }
                 .ai-exporter-tooltip .ai-exporter-shortcut-row { white-space: nowrap; }
@@ -251,7 +259,7 @@
                     background: ${t.panelGradient};
                     border-radius: 14px;
                     box-shadow: ${t.shadow};
-                    border: 2px solid ${t.borderSoft};
+                    border: none;
                     overflow: hidden;
                 }
                 #ai-exporter-content.open { display: flex; }
@@ -391,7 +399,10 @@
       URL.revokeObjectURL(url);
     },
 
-    /** Expands {platform}/{title}/{timestamp}/{tags}/{tagN}/{exporter} placeholders into a safe filename. */
+    /**
+     * Expands {platform}/{title}/{timestamp}/{tags}/{tagN}/{exporter}
+     * placeholders into a safe filename.
+     */
     formatFileName(format, title, tags, ext, platformId) {
       const tagsArray = Array.isArray(tags) ? tags : [];
       const replacements = {
@@ -421,7 +432,10 @@
       );
     },
 
-    /** Splits "#tag1 My chat title #tag2" into { title: "My chat title", tags: ["tag1","tag2"] }. */
+    /**
+     * Splits "#tag1 My chat title #tag2" into { title: "My chat title", tags:
+     * ["tag1","tag2"] }.
+     */
     parseChatTitleAndTags(rawTitle) {
       const tags = [];
       let cleanedTitle = rawTitle.trim();
@@ -451,7 +465,10 @@
    * ========================================================================== */
   const Lib = {};
 
-  /** Minimal Turndown-style HTML -> Markdown converter driven by pluggable rules. */
+  /**
+   * Minimal Turndown-style HTML -> Markdown converter driven by pluggable
+   * rules.
+   */
   Lib.TurndownService = class TurndownService {
     constructor(options = {}) {
       this.rules = [];
@@ -496,7 +513,10 @@
     }
   };
 
-  /** Converts arbitrary JSON into a compact TOON (Token-Oriented Object Notation) string. */
+  /**
+   * Converts arbitrary JSON into a compact TOON (Token-Oriented Object
+   * Notation) string.
+   */
   Lib.jsonToToon = function jsonToToon(obj, indent = 0) {
     const nextSpaces = " ".repeat(indent + 1);
     if (obj === null || obj === undefined) return "null";
@@ -563,7 +583,10 @@
     BG: "#ffffff",
     FG: "#000000",
 
-    /** Flattens messages to "U:"/"A:" lines, converting JSON payloads to TOON and collapsing whitespace. */
+    /**
+     * Flattens messages to "U:"/"A:" lines, converting JSON payloads to TOON
+     * and collapsing whitespace.
+     */
     serialize(messages) {
       return messages
         .map((m) => {
@@ -1015,7 +1038,10 @@
       }
       return messages;
     },
-    /** Gemini has no reliable title while the first turn is still streaming — derive one from the first question. */
+    /**
+     * Gemini has no reliable title while the first turn is still streaming —
+     * derive one from the first question.
+     */
     deriveTitleFallback(title, messages) {
       if (
         title !== Config.DEFAULT_CHAT_TITLE ||
@@ -1139,7 +1165,10 @@
     },
   };
 
-  /** Resolves the active platform adapter from window.location, or null if unsupported. */
+  /**
+   * Resolves the active platform adapter from window.location, or null if
+   * unsupported.
+   */
   Platforms.detectCurrent = function detectCurrent() {
     const hostname = window.location.hostname;
     return (
@@ -1158,7 +1187,10 @@
     _currentChatData: null,
     _selectedMessageIds: new Set(),
 
-    /** Reads the DOM via the given platform adapter into a normalized ChatData object. */
+    /**
+     * Reads the DOM via the given platform adapter into a normalized ChatData
+     * object.
+     */
     extractChatData(platform, doc) {
       const messages = platform.extractMessages(doc);
       if (messages.length === 0) return null;
@@ -1179,7 +1211,10 @@
       };
     },
 
-    /** Builds a fresh Turndown instance wired with the shared rules + the active platform's rules. */
+    /**
+     * Builds a fresh Turndown instance wired with the shared rules + the active
+     * platform's rules.
+     */
     buildTurndown(platform) {
       const turndown = new Lib.TurndownService();
       SharedTurndownRules.registerAll(turndown, platform);
@@ -1274,7 +1309,10 @@
       },
     },
 
-    /** Reads the current outline selection, builds the export, and triggers a download. */
+    /**
+     * Reads the current outline selection, builds the export, and triggers a
+     * download.
+     */
     initiateExport(format, platform) {
       const rawChatData = ChatExporter._currentChatData;
       if (!rawChatData || rawChatData.messages.length === 0)
@@ -1342,7 +1380,10 @@
     },
   };
 
-  /** Turndown rules shared by every platform (headings, lists, tables, links, ...). */
+  /**
+   * Turndown rules shared by every platform (headings, lists, tables, links,
+   * ...).
+   */
   const SharedTurndownRules = {
     registerAll(turndown, platform) {
       turndown.addRule("lineBreak", { filter: "br", replacement: () => " \n" });
@@ -1476,8 +1517,10 @@
         replacement: (content) =>
           content.trim() ? `<sup>${content}</sup>` : "",
       });
-      // NOTE: platform.registerTurndownRules() runs AFTER these and may override
-      // "pre"/"code"-family rules with site-specific DOM handling (see Platforms.*).
+      // NOTE: platform.registerTurndownRules() runs AFTER these and may
+      // override
+      // "pre"/"code"-family rules with site-specific DOM handling (see
+      // Platforms.*).
       turndown.addRule("pre", {
         filter: "pre",
         replacement: (content, node) => {
@@ -1762,9 +1805,11 @@
       if (rect.left < 360) {
         content.style.right = "auto";
         content.style.left = "60px";
+        panel.classList.add("on-left");
       } else {
         content.style.left = "auto";
         content.style.right = "60px";
+        panel.classList.remove("on-left");
       }
     },
 
@@ -1838,7 +1883,10 @@
 
     /* ---------------- Feature sections (each is self-contained) ---------------- */
     sections: {
-      /** Shared "checklist + download button" body used by both MD and JSON export sections. */
+      /**
+       * Shared "checklist + download button" body used by both MD and JSON
+       * export sections.
+       */
       buildOutlineBody(downloadLabel, downloadFormat) {
         const wrap = document.createElement("div");
         wrap.style.display = "flex";
@@ -2306,7 +2354,8 @@
           while (results.firstChild) results.removeChild(results.firstChild);
           status.textContent = `${pages.reduce((sum, p) => sum + p.chars, 0).toLocaleString()} chars → ${pages.length} image(s)`;
 
-          // Only offer "Copy Image & Open New Chat" when everything fit on one page.
+          // Only offer "Copy Image & Open New Chat" when everything fit on one
+          // page.
           if (pages.length === 1) {
             const newChatBtn = document.createElement("button");
             newChatBtn.className = "ai-exporter-btn secondary";
@@ -2455,7 +2504,10 @@
         UI._renderOutlineItemsJson();
     },
 
-    /** Gemini-only: repeatedly scrolls to top to force-load full chat history before extraction. */
+    /**
+     * Gemini-only: repeatedly scrolls to top to force-load full chat history
+     * before extraction.
+     */
     async autoScrollToTop() {
       if (UI.autoScrollEnabled === false || !UI._platform?.hasAutoScroll)
         return;
