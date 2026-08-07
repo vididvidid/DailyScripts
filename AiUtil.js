@@ -3,26 +3,6 @@
  * Author: vididvidid , mic mejia
  * Created: 2026-08-07 18:58:38
  */
-
-// ==UserScript==
-// @name         AI Utils
-// @namespace    https://github.com/revivalstack/chatgpt-exporter
-// @version      3.6.0
-// @description  Export your ChatGPT, Claude, Copilot, Gemini or Grok chat into a properly and elegantly formatted Markdown or JSON. Includes Text Minifier, JSON→TOON converter and Snapcompact — in one draggable, two-column icon-dock panel.
-// @author       Vididvidid, Mic Mejia
-// @license      MIT License
-// @match        https://chat.openai.com/*
-// @match        https://chatgpt.com/*
-// @match        https://claude.ai/*
-// @match        https://www.copilot.com/*
-// @match        https://gemini.google.com/*
-// @match        https://grok.com/*
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_registerMenuCommand
-// @noframes
-// ==/UserScript==
-
 /**
  * ============================================================================
  * ARCHITECTURE OVERVIEW
