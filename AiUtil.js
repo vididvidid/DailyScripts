@@ -2,6 +2,16 @@
  * File: AiUtil.js
  * Author: vididvidid , mic mejia
  * Created: 2026-08-07 18:58:38
+ *
+ * versions:
+ *
+ *  0.1.0        json to toon
+ *               text minifier
+ *               snapcompact
+ *               json download
+ *               md download
+ *               URL way to detect page change
+ *               Auto scroll for lazy loading
  */
 
 // ==UserScript==

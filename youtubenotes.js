@@ -4,6 +4,10 @@
  * Created: 2026-07-27 22:31:14
  *
  * versions: 
+ * 
+ * 0.2.0          watched videos record, 
+ *                block watched videos
+ *
  * 0.1.0          notes Ui box below video and shorts
  *                global display of notes over video thumnail
  */
