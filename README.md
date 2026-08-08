@@ -1,4 +1,4 @@
-# AiUtils & YouTube Notes
+# Daily Scripts ;-D
 
 These are some utilities I found myself needing and found useful, so I created them. 
 Made by: Gemini, Claude, and me.
