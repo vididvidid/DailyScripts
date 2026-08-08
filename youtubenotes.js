@@ -66,22 +66,45 @@
         const data = load();
         return !!(data[id] && data[id].note && data[id].note.trim());
       },
+      isWatched(id) {
+        const data = load();
+        return !!(data[id] && data[id].watched);
+      },
+      markWatched(id, type) {
+        const data = load();
+        if (!data[id]) {
+          data[id] = { type: type || 'video', note: '', watched: true, updated: Date.now() };
+        } else {
+          data[id].watched = true;
+        }
+        persist();
+        notify(id);
+      },
       set(id, note, type) {
         const data = load();
         const trimmed = (note || '').trim();
         if (!trimmed) {
           if (data[id]) {
-            delete data[id];
+            if (data[id].watched) {
+              data[id].note = '';
+              data[id].updated = Date.now();
+            } else {
+              delete data[id];
+            }
             persist();
             notify(id);
           }
           return;
         }
-        data[id] = {
-          type: type || (data[id] && data[id].type) || 'video',
-          note: note,
-          updated: Date.now()
-        };
+        if (!data[id]) {
+          data[id] = {};
+        }
+        data[id].type = type || data[id].type || 'video';
+        data[id].note = note;
+        if (typeof data[id].watched === 'undefined') {
+          data[id].watched = false;
+        }
+        data[id].updated = Date.now();
         persist();
         notify(id);
       },
@@ -241,22 +264,22 @@
    * SHORTS PLAYER PAGE (textarea above channel name)
    * ============================================================ */
 
-  function isVisible(el) {
-    if (!el || !el.getClientRects().length) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 && el.offsetParent !== null;
+  function getActiveShortRenderer() {
+    let renderer = document.querySelector('ytd-reel-video-renderer[is-active]');
+    if (!renderer) {
+      const player = document.querySelector('ytd-shorts #shorts-player, ytm-shorts #shorts-player, ytd-shorts ytd-player');
+      if (player) renderer = player.closest('ytd-reel-video-renderer, ytm-reel-video-renderer');
+    }
+    return renderer;
   }
 
   function getActiveShortMetapanel() {
-    const panels = document.querySelectorAll('yt-reel-metapanel-view-model');
-    for (const panel of panels) {
-      if (isVisible(panel)) return panel;
-    }
-    return null;
+    const activeRenderer = getActiveShortRenderer();
+    return activeRenderer ? activeRenderer.querySelector('yt-reel-metapanel-view-model') : null;
   }
 
   function getLegacyChannelInfoContainer() {
-    const activeRenderer = document.querySelector('ytd-reel-video-renderer[is-active]');
+    const activeRenderer = getActiveShortRenderer();
     if (!activeRenderer) return null;
     const channelInfo = safeQuery(activeRenderer, [
       'ytd-reel-player-header-renderer',
@@ -294,6 +317,143 @@
   }
 
   /* ============================================================
+   * VIDEO PLAYER OVERLAY (Already Watched)
+   * ============================================================ */
+
+  const dismissedOverlays = new Set();
+  let currentNavigatedVideo = null;
+  let currentNavigatedVideoWasWatched = false;
+
+  function markCurrentVideoSeen(info) {
+    if (!info) return;
+    if (info.id !== currentNavigatedVideo) {
+      currentNavigatedVideo = info.id;
+      currentNavigatedVideoWasWatched = Store.isWatched(info.id);
+      Store.markWatched(info.id, info.type);
+    }
+  }
+
+  let enforcerTimer = null;
+  function startEnforcer() {
+    if (enforcerTimer) return;
+    enforcerTimer = setInterval(() => {
+      const current = getCurrentPageVideo();
+      if (!current) return;
+
+      if (current.id !== currentNavigatedVideo) {
+        onNavigate();
+      }
+
+      checkAndApplyOverlay();
+    }, 150);
+  }
+
+  function removeVideoPlayerOverlay() {
+    document.querySelectorAll('.ytnotes-video-overlay').forEach(el => el.remove());
+    document.querySelectorAll('video').forEach(v => {
+      if (v._ytnotesPaused) {
+        if (v._ytnotesOriginalMuted !== undefined) {
+          v.muted = v._ytnotesOriginalMuted;
+          delete v._ytnotesOriginalMuted;
+        }
+        if (v.paused) {
+          const container = v.closest('.html5-video-player');
+          const playBtn = container ? container.querySelector('.ytp-play-button') : null;
+          if (playBtn) playBtn.click();
+          else v.play().catch(()=>{});
+        }
+        delete v._ytnotesPaused;
+      }
+    });
+  }
+
+  let lastShortsScrollPos = null;
+
+  function checkAndApplyOverlay() {
+    const current = getCurrentPageVideo();
+    if (!current) return;
+
+    markCurrentVideoSeen(current);
+
+    const wasWatchedBefore = currentNavigatedVideoWasWatched;
+
+    if (!wasWatchedBefore || Store.has(current.id) || dismissedOverlays.has(current.id)) {
+      removeVideoPlayerOverlay();
+      return;
+    }
+
+    let container = null;
+    let videoEl = null;
+    if (current.type === 'video') {
+      container = document.querySelector('#movie_player') || document.querySelector('.html5-video-player');
+      videoEl = document.querySelector('video.html5-main-video') || document.querySelector('video');
+    } else {
+      let activeRenderer = getActiveShortRenderer();
+      if (activeRenderer) {
+        const currentPos = activeRenderer.getBoundingClientRect().top;
+        if (lastShortsScrollPos !== null && Math.abs(currentPos - lastShortsScrollPos) > 10) {
+           lastShortsScrollPos = currentPos;
+           return; // Abort during scroll transition
+        }
+        lastShortsScrollPos = currentPos;
+        container = activeRenderer.querySelector('.short-video-container') || activeRenderer;
+        videoEl = activeRenderer.querySelector('video');
+      }
+    }
+
+    if (!container) return;
+
+    // Clean up left-over overlays in wrong containers (critical for shorts scrolling)
+    document.querySelectorAll('.ytnotes-video-overlay').forEach(el => {
+      if (el.parentElement !== container) el.remove();
+    });
+
+    let overlay = container.querySelector('.ytnotes-video-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'ytnotes-video-overlay';
+      
+      const icon = document.createElement('div');
+      icon.className = 'ytnotes-video-overlay-icon';
+      icon.textContent = '❌';
+      overlay.appendChild(icon);
+      
+      overlay.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (confirm('Do you really want to watch this video again?')) {
+          dismissedOverlays.add(current.id);
+          removeVideoPlayerOverlay();
+        }
+      });
+      
+      const style = window.getComputedStyle(container);
+      if (style.position === 'static') {
+        container.style.position = 'relative';
+      }
+      container.appendChild(overlay);
+    }
+
+    // Always enforce pause/mute on ALL videos in the active renderer
+    if (current.type === 'shorts') {
+       const activeRenderer = getActiveShortRenderer();
+       if (activeRenderer) {
+         activeRenderer.querySelectorAll('video').forEach(v => {
+           if (!v.paused) v.pause();
+           if (v._ytnotesOriginalMuted === undefined) v._ytnotesOriginalMuted = v.muted;
+           v.muted = true;
+           v._ytnotesPaused = true;
+         });
+       }
+    } else if (videoEl) {
+       if (!videoEl.paused) videoEl.pause();
+       if (videoEl._ytnotesOriginalMuted === undefined) videoEl._ytnotesOriginalMuted = videoEl.muted;
+       videoEl.muted = true;
+       videoEl._ytnotesPaused = true;
+    }
+  }
+
+  /* ============================================================
    * THUMBNAIL OVERLAYS (home, search, related, channel, subs,
    * history, playlists, Shorts shelves, Shorts grid — everywhere)
    * ============================================================ */
@@ -309,30 +469,32 @@
     return !!a.querySelector('img, yt-image, yt-thumbnail-view-model, ytd-thumbnail, .ytCoreImageHost');
   }
 
-  function renderOverlay(anchor, note) {
-    let overlay = anchor.querySelector(':scope > .ytnotes-overlay');
+  function updateThumbnailOverlay(anchor, id) {
+    const hasNote = Store.has(id);
+    const isWatched = Store.isWatched(id);
+
+    let overlay = anchor.querySelector('.ytnotes-thumbnail-overlay');
+    
+    if (!hasNote && !isWatched) {
+      if (overlay) overlay.remove();
+      return;
+    }
+
     if (!overlay) {
       overlay = document.createElement('div');
-      overlay.className = 'ytnotes-overlay';
-      const inner = document.createElement('span');
-      inner.className = 'ytnotes-overlay-text';
-      overlay.appendChild(inner);
+      overlay.className = 'ytnotes-thumbnail-overlay';
       const style = getComputedStyle(anchor);
       if (style.position === 'static') anchor.style.position = 'relative';
       anchor.appendChild(overlay);
     }
-    overlay.querySelector('.ytnotes-overlay-text').textContent = note;
 
-    // Scale the type to the thumbnail's own width so a small channel-shelf
-    // thumb and a big home-page thumb both read as "one big confident line".
-    const width = anchor.getBoundingClientRect().width || 200;
-    const fontSize = Math.max(13, Math.min(30, width * 0.085));
-    overlay.style.fontSize = fontSize + 'px';
-  }
-
-  function removeOverlay(anchor) {
-    const overlay = anchor.querySelector(':scope > .ytnotes-overlay');
-    if (overlay) overlay.remove();
+    if (hasNote) {
+      overlay.className = 'ytnotes-thumbnail-overlay ytnotes-thumbnail-overlay-note';
+      overlay.textContent = Store.get(id);
+    } else {
+      overlay.className = 'ytnotes-thumbnail-overlay ytnotes-thumbnail-overlay-cross';
+      overlay.textContent = '❌';
+    }
   }
 
   function processAnchor(anchor) {
@@ -342,12 +504,7 @@
     if (!info) return;
 
     anchor.setAttribute('data-ytnotes-video-id', info.id);
-
-    if (Store.has(info.id)) {
-      renderOverlay(anchor, Store.get(info.id));
-    } else {
-      removeOverlay(anchor);
-    }
+    updateThumbnailOverlay(anchor, info.id);
   }
 
   function processAllThumbnails(root) {
@@ -358,12 +515,17 @@
 
   function refreshOverlaysForId(id) {
     deepQueryAll(document, `a[data-ytnotes-video-id="${CSS.escape(id)}"]`).forEach((anchor) => {
-      if (Store.has(id)) {
-        renderOverlay(anchor, Store.get(id));
-      } else {
-        removeOverlay(anchor);
-      }
+      updateThumbnailOverlay(anchor, id);
     });
+
+    const current = getCurrentPageVideo();
+    if (current && current.id === id) {
+      if (Store.has(id)) {
+        removeVideoPlayerOverlay();
+      } else {
+        checkAndApplyOverlay();
+      }
+    }
   }
   Store.onChange(refreshOverlaysForId);
 
@@ -390,25 +552,9 @@
       feedObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
 
-    // Safety net: shelves that render inside shadow roots created before
-    // this observer attached, or that mutate in ways the observer misses,
-    // still get picked up within ~1s. Cheap because processAllThumbnails
-    // is a no-op per-anchor once data-ytnotes-video-id + overlay exist.
     if (!fallbackTimer) {
       fallbackTimer = setInterval(() => processAllThumbnails(), FALLBACK_SCAN_INTERVAL_MS);
     }
-  }
-
-  function observeShortsActivePlayer() {
-    if (shortsObserver) shortsObserver.disconnect();
-    const shortsRoot = document.querySelector('ytd-shorts') || document.body;
-    shortsObserver = new MutationObserver(() => retryUntil(attachShortPage));
-    shortsObserver.observe(shortsRoot, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['is-active']
-    });
   }
 
   /* ============================================================
@@ -416,14 +562,12 @@
    * ============================================================ */
 
   function onNavigate() {
-    scheduleThumbnailScan();
-
-    if (location.pathname === '/watch') {
-      retryUntil(attachWatchPage);
-    } else if (location.pathname.startsWith('/shorts/')) {
-      retryUntil(attachShortPage);
-      observeShortsActivePlayer();
-    }
+      // Re-run injections when navigating
+      if (location.pathname === '/watch') {
+        retryUntil(attachWatchPage);
+      } else if (location.pathname.startsWith('/shorts/')) {
+        retryUntil(attachShortPage);
+      }
   }
 
   document.addEventListener('yt-navigate-finish', onNavigate);
@@ -479,36 +623,70 @@
       }
       .ytnotes-shorts-box .ytnotes-status { color: rgba(255,255,255,0.75); }
 
-      /* Full-thumbnail "keynote slide" note overlay: covers the entire
-         thumbnail, white background, big bold left-aligned text. */
-      .ytnotes-overlay {
-        position: absolute;
-        inset: 0;
-        z-index: 2200;
-        background: #ffffff;
-        display: flex;
-        align-items: center;
-        justify-content: flex-start;
-        padding: 16px 18px;
-        box-sizing: border-box;
-        pointer-events: none;
-        border-radius: inherit;
-        overflow: hidden;
+      .ytnotes-video-overlay {
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        z-index: 2147483647 !important;
+        background: rgba(0, 0, 0, 0.85) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        pointer-events: auto !important;
       }
-      .ytnotes-overlay-text {
-        display: -webkit-box;
-        -webkit-box-orient: vertical;
-        -webkit-line-clamp: 4;
+      .ytnotes-video-overlay-icon {
+        font-size: 150px !important;
+        color: #ff0000 !important;
+        line-height: 1 !important;
+        text-shadow: 0 8px 24px rgba(0,0,0,0.8) !important;
+        user-select: none !important;
+      }
+
+      .ytnotes-thumbnail-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 99;
+        pointer-events: none;
+        max-height: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
-        width: 100%;
-        text-align: left;
         color: #0a0a0a;
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
           "Helvetica Neue", Helvetica, Arial, sans-serif;
         font-weight: 700;
         line-height: 1.15;
         letter-spacing: -0.01em;
+      }
+      .ytnotes-thumbnail-overlay-note {
+        background: rgba(255, 255, 255, 0.95) !important;
+        color: #000 !important;
+        inset: 0 !important;
+        padding: 16px !important;
+        display: -webkit-box !important;
+        -webkit-box-orient: vertical !important;
+        -webkit-line-clamp: 6 !important;
+        overflow: hidden !important;
+        font-size: 15px !important;
+        font-weight: bold !important;
+        text-align: left !important;
+        white-space: normal !important;
+      }
+      .ytnotes-thumbnail-overlay-cross {
+        background: rgba(0, 0, 0, 0.7) !important;
+        color: white !important;
+        font-size: 40px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        inset: 0 !important;
+        padding: 0 !important;
       }
     `;
     document.head.appendChild(style);
@@ -521,12 +699,12 @@
   function init() {
     injectStyles();
     observeFeeds();
+    startEnforcer();
 
     if (location.pathname === '/watch') {
       retryUntil(attachWatchPage);
     } else if (location.pathname.startsWith('/shorts/')) {
       retryUntil(attachShortPage);
-      observeShortsActivePlayer();
     }
   }
 
