@@ -1,7 +1,7 @@
 # Daily Scripts ;-D
 
 These are some utilities I found myself needing and found useful, so I created them. 
-Made by: Gemini, Claude, and me.
+
 
 ## Scripts Included
 
@@ -36,6 +36,11 @@ These scripts run using the [Tampermonkey](https://www.tampermonkey.net/) browse
    - Use the code in `template.js` as your boilerplate.
    - Update the `@require` path in the template to point to the absolute path of `AiUtil.js` or `youtubenotes.js` on your local machine (e.g., `file:///path/to/repo/youtubenotes.js`).
    - Save the script (`Ctrl + S` or `Cmd + S`).
+
+- Made by: me and other engineers (whose projects I used or part of code I used)
+- AI used: Gemini, Claude
+- Tool used: Vim
+- AI tool: agy
 
 ## License
 MIT License
