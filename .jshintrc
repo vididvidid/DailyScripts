@@ -1,1 +1,0 @@
-{"browser": true, "esversion": 11, "undef": true, "globals": {"GM_setClipboard":false, "GM_addStyle":false, "html2canvas":false, "jspdf":false, "GM_xmlhttpRequest":false, "GM_registerMenuCommand":false, "module":false, "require":false}}
