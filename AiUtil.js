@@ -1894,6 +1894,10 @@
 
     /* ---------------- Section switching ---------------- */
     showSection(id) {
+      if (UI._activeSectionId === id) {
+        UI.closeSection();
+        return;
+      }
       UI._activeSectionId = id;
       Store.set(Config.GM_KEYS.PANEL_ACTIVE_SECTION, id);
       document
