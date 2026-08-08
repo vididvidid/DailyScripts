@@ -154,7 +154,7 @@
                     display: flex;
                     flex-direction: column;
                     align-items: center;
-                    gap: 6px;
+                    gap: 0; /* Remove gap to ensure contiguous hit areas */
                     padding: 8px 6px;
                     background: ${t.railGradient};
                     border-radius: 14px;
@@ -180,38 +180,85 @@
                 .ai-exporter-rail-spacer { flex: 1; min-height: 4px; }
 
                 .ai-exporter-rail-btn {
-                    width: 40px;
-                    height: 40px;
-                    border-radius: 10px;
-                    border: 1px solid ${t.borderSoft};
-                    background: #ffffff;
-                    color: ${t.textMuted};
+                    width: 36px;
+                    height: 36px;
+                    margin: 0; /* Zero margin to ensure borders touch for stable tracking */
+                    border-radius: 12px;
+                    border: 3px solid transparent; /* Acts as visual gap but keeps hit area solid */
+                    background-clip: padding-box;
+                    background-color: rgba(0, 0, 0, 0.08); /* Default light black */
+                    color: ${t.textLight}; /* Fix visibility */
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     justify-content: center;
                     cursor: pointer;
-                    font-size: 10.5px;
                     font-weight: 800;
                     letter-spacing: 0.2px;
                     line-height: 1.1;
                     position: relative;
                     flex-shrink: 0;
+                    transition: all 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.1);
                 }
-                .ai-exporter-rail-btn:hover { background: #f5f5f5; color: ${t.textLight}; }
-                .ai-exporter-rail-btn.active {
-                    background: ${t.railIconActive};
+                
+                /* Fisheye Dock Effect - Gradient Black */
+                .ai-exporter-rail-btn:hover {
+                    width: 48px;
+                    height: 48px;
+                    z-index: 10;
+                    background-color: rgba(0, 0, 0, 0.85); /* Main focus black */
                     color: #ffffff;
-                    border-color: #000000;
+                    border-radius: 14px;
+                    border-width: 2px;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+                }
+                .ai-exporter-rail-btn:hover .rail-icon-emoji { font-size: 20px; }
+                .ai-exporter-rail-btn:hover .rail-icon-text { font-size: 11px; opacity: 1; color: #ffffff; }
+
+                /* Immediate siblings */
+                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover),
+                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn {
+                    width: 42px;
+                    height: 42px;
+                    z-index: 9;
+                    background-color: rgba(0, 0, 0, 0.5); /* Lighter black */
+                    color: #ffffff;
+                    border-radius: 12px;
+                    border-width: 2px;
+                }
+                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover) .rail-icon-emoji,
+                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn .rail-icon-emoji { font-size: 16px; }
+                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover) .rail-icon-text,
+                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn .rail-icon-text { font-size: 10px; color: #ffffff; }
+
+                /* 2nd level siblings */
+                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover),
+                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn {
+                    width: 38px;
+                    height: 38px;
+                    z-index: 8;
+                    background-color: rgba(0, 0, 0, 0.25); /* More light black */
+                    border-radius: 10px;
+                    border-width: 2px;
+                }
+                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover) .rail-icon-emoji,
+                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn .rail-icon-emoji { font-size: 14px; }
+                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover) .rail-icon-text,
+                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn .rail-icon-text { font-size: 9px; }
+
+                .ai-exporter-rail-btn.active {
+                    background-color: #000000;
+                    color: #ffffff;
+                    border-color: transparent;
                     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
                 }
-                .ai-exporter-rail-btn .rail-icon-emoji { font-size: 15px; line-height: 1; }
-                .ai-exporter-rail-btn .rail-icon-text { font-size: 10px; margin-top: 1px; }
+                .ai-exporter-rail-btn .rail-icon-emoji { font-size: 14px; line-height: 1; transition: all 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.1); }
+                .ai-exporter-rail-btn .rail-icon-text { font-size: 8.5px; opacity: 0.8; height: auto; margin-top: 1px; transition: all 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.1); }
 
                 .ai-exporter-rail-btn.small-btn {
-                    width: 28px; height: 28px; border-radius: 8px; margin: 2px 0;
+                    width: 30px; height: 30px; border-radius: 8px; margin: 0; border-width: 2px;
                 }
-                .ai-exporter-rail-btn.small-btn .rail-icon-emoji { font-size: 14px; margin: 0; }
+                .ai-exporter-rail-btn.small-btn .rail-icon-emoji { font-size: 13px; margin: 0; }
 
                 .ai-exporter-tooltip {
                     position: absolute;
