@@ -136,6 +136,15 @@
                     background: transparent;
                     color: ${t.textLight};
                     font-family: ${Theme.fontStack};
+                    transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+                    transform-origin: top right;
+                    transform: scale(0.65);
+                }
+                #${Config.DOM.PANEL_ID}:hover, #${Config.DOM.PANEL_ID}:has(#ai-exporter-content.open) {
+                    transform: scale(1);
+                }
+                #${Config.DOM.PANEL_ID}.on-left {
+                    transform-origin: top left;
                 }
                 #${Config.DOM.PANEL_ID} * { box-sizing: border-box; }
 
