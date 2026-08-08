@@ -1,6 +1,7 @@
 # Daily Scripts ;-D
 
 These are some utilities I found myself needing and found useful, so I created them. 
+Why scripts: Because i found mostly myself in browser or in terminal. That's all where i live most of my time. 
 
 
 ## Scripts Included
