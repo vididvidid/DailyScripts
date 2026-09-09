@@ -15,18 +15,27 @@
  *
  *  0.2.0        Prompt Library (save / edit / delete prompts)
  *               GitHub Gist sync for the prompt library
- *               Quick Bar — floating prompt strip docked over the site's
+ *               Quick Dock — floating prompt strip over the site's
  *               composer/input box; click a prompt to insert it
  *               Chat-source picker (selected / entire chat / custom) for the
  *               Text Minifier and JSON->TOON tools
  *               Panel now shows on empty/new chats instead of hiding
+ *
+ *  0.3.0        Each tool now carries its own turn checklist — "pick turns"
+ *               used to read the export outline, which is not in the DOM
+ *               unless that section is open, so it was always empty
+ *               Floating Dock position stored as a viewport fraction, so it
+ *               stops wandering when the window is resized
+ *               Named the two pieces: Floating Dock and Quick Dock
+ *               bookmarklet.html — packs the script into a javascript: URL
+ *               for mobile browsers with no userscript manager
  */
 
 // ==UserScript==
 // @name         ChatGPT / Claude / Copilot / Gemini / Grok AI Chat Exporter by RevivalStack
 // @namespace    [old]https://github.com/revivalstack/chatgpt-exporter
-// @version      3.7.0
-// @description  Export your ChatGPT, Claude, Copilot, Gemini or Grok chat into a properly and elegantly formatted Markdown or JSON. Includes a Gist-synced Prompt Library with a quick bar over the site's input box, Text Minifier, JSON→TOON converter and Snapcompact — in one draggable, two-column icon-dock panel.
+// @version      3.8.0
+// @description  Export your ChatGPT, Claude, Copilot, Gemini or Grok chat into a properly and elegantly formatted Markdown or JSON. Includes a Gist-synced Prompt Library with a Quick Dock over the site's input box, Text Minifier, JSON→TOON converter and Snapcompact — in one draggable, two-column icon-dock panel.
 // @author       vididvidid, Mic Mejia (Refactored UI)
 // @license      MIT License
 // @match        https://chat.openai.com/*
@@ -63,12 +72,12 @@
  *  10. ChatExporter   - core domain logic: extract -> format -> download.
  *                       Delegates all site-specific work to Platforms.
  *  11. UI             - panel shell, drag handling, sections (the "app"),
- *                       plus QuickBar (the strip docked over the composer).
+ *                       plus QuickDock — the strip over the composer.
  *  12. Bootstrap      - wires everything together and starts the script.
  *
  * To add a new export format:      add a formatter in ChatExporter.formatters
  * To add a new AI site:            add an entry to Platforms.registry
- *                                  (include composerSelectors for the QuickBar)
+ *                                  (include composerSelectors for the Quick Dock)
  * To add a new panel feature:      add a "section" module under UI.sections
  * To change colors/spacing:        edit Theme.tokens only
  * ============================================================================
@@ -80,13 +89,17 @@
    * 1. CONFIG — constants & persisted-setting keys. No logic lives here.
    * ========================================================================== */
   const Config = {
-    VERSION: "3.7.0",
+    VERSION: "3.8.0",
     DOM_READY_TIMEOUT_MS: 1000,
     AUTOSCROLL_INITIAL_DELAY_MS: 2000,
 
-    // How often the QuickBar re-checks that it is still glued to the composer.
-    QUICKBAR_POLL_MS: 600,
-    QUICKBAR_MAX_CHIPS: 12,
+    // How often the QuickDock re-checks that it is still glued to the composer.
+    QUICKDOCK_POLL_MS: 600,
+    // Keep-off-the-edges margin for the Floating Dock, in px. The drag bounds,
+    // the free-space maths and the restore path all share it, so a saved
+    // position round-trips to exactly where it was left.
+    PANEL_EDGE_MARGIN: 4,
+    QUICKDOCK_MAX_CHIPS: 12,
 
     DEFAULT_CHAT_TITLE: "chat",
     DEFAULT_OUTPUT_FILE_FORMAT: "{platform}_{title}_{timestampLocal}",
@@ -96,7 +109,7 @@
       PANEL_ID: "ai-exporter-panel",
       PANEL_BODY_ID: "ai-exporter-panel-body",
       OUTLINE_LIST_ID: "ai-exporter-outline-list",
-      QUICKBAR_ID: "ai-exporter-quickbar",
+      QUICKDOCK_ID: "ai-exporter-quick-dock",
     },
 
     // GitHub Gist is the sync backend for the prompt library. A single secret
@@ -112,8 +125,10 @@
     // Tampermonkey GM_* storage keys, centralized so nothing is a magic string.
     GM_KEYS: {
       OUTPUT_FILE_FORMAT: "aiChatExporter_fileFormat",
-      PANEL_POS_X: "aiChatExporter_panelPosX",
-      PANEL_POS_Y: "aiChatExporter_panelPosY",
+      PANEL_POS_X: "aiChatExporter_panelPosX", // legacy px, migrated on load
+      PANEL_POS_Y: "aiChatExporter_panelPosY", // legacy px, migrated on load
+      PANEL_POS_RATIO_X: "aiUtil_panelPosRatioX",
+      PANEL_POS_RATIO_Y: "aiUtil_panelPosRatioY",
       PANEL_GLOBAL_COLLAPSED: "aiChatExporter_globalCollapsed",
       PANEL_ACTIVE_SECTION: "aiChatExporter_panelActiveSection",
       CHAT_TITLE_PREFIX: "aiChatExporter_chatTitlePrefix",
@@ -122,7 +137,7 @@
       GIST_TOKEN: "aiUtil_gistToken",
       GIST_ID: "aiUtil_gistId",
       GIST_LAST_SYNC: "aiUtil_gistLastSync",
-      QUICKBAR_ENABLED: "aiUtil_quickbarEnabled",
+      QUICKDOCK_ENABLED: "aiUtil_quickDockEnabled",
     },
 
     MARKDOWN: {
@@ -427,6 +442,10 @@
                     max-height: 220px; overflow-y: auto; display: flex; flex-direction: column;
                     gap: 3px; margin-top: 6px;
                 }
+                .ai-exporter-msg-list {
+                    max-height: 180px; overflow-y: auto; display: flex; flex-direction: column;
+                    gap: 3px;
+                }
                 .ai-exporter-outline-item { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 5px; }
                 .ai-exporter-outline-item:hover { background: #f5f5f5; }
                 .ai-exporter-outline-item span {
@@ -500,12 +519,12 @@
             `;
       document.head.appendChild(style);
 
-      /* Injected separately: the QuickBar lives outside the panel, docked over
-       * the host site's composer, so it cannot inherit the panel's styles. */
+      /* Injected separately: the Quick Dock lives outside the Floating Dock,
+       * over the host site's composer, so it cannot inherit its styles. */
       const quickStyle = document.createElement("style");
-      quickStyle.id = "ai-exporter-quickbar-styles";
+      quickStyle.id = "ai-exporter-quick-dock-styles";
       quickStyle.textContent = `
-                #${Config.DOM.QUICKBAR_ID} {
+                #${Config.DOM.QUICKDOCK_ID} {
                     position: fixed;
                     z-index: 2147482000;
                     display: none;
@@ -524,17 +543,17 @@
                     opacity: 0.55;
                     transition: opacity 0.15s ease;
                 }
-                #${Config.DOM.QUICKBAR_ID}.visible { display: flex; }
-                #${Config.DOM.QUICKBAR_ID}:hover { opacity: 1; }
-                #${Config.DOM.QUICKBAR_ID} * { box-sizing: border-box; }
-                #${Config.DOM.QUICKBAR_ID} .qb-scroll {
+                #${Config.DOM.QUICKDOCK_ID}.visible { display: flex; }
+                #${Config.DOM.QUICKDOCK_ID}:hover { opacity: 1; }
+                #${Config.DOM.QUICKDOCK_ID} * { box-sizing: border-box; }
+                #${Config.DOM.QUICKDOCK_ID} .qd-scroll {
                     display: flex; align-items: center; gap: 5px;
                     overflow-x: auto; overflow-y: hidden;
                     flex: 1; min-width: 0; scrollbar-width: none;
                     scroll-behavior: smooth;
                 }
-                #${Config.DOM.QUICKBAR_ID} .qb-scroll::-webkit-scrollbar { height: 0; }
-                #${Config.DOM.QUICKBAR_ID} .qb-chip {
+                #${Config.DOM.QUICKDOCK_ID} .qd-scroll::-webkit-scrollbar { height: 0; }
+                #${Config.DOM.QUICKDOCK_ID} .qd-chip {
                     flex: 0 0 auto; max-width: 190px;
                     height: 24px; padding: 0 9px;
                     border-radius: 12px; border: 1px solid rgba(0, 0, 0, 0.25);
@@ -543,8 +562,8 @@
                     cursor: pointer; white-space: nowrap;
                     overflow: hidden; text-overflow: ellipsis;
                 }
-                #${Config.DOM.QUICKBAR_ID} .qb-chip:hover { background: #000000; color: #ffffff; }
-                #${Config.DOM.QUICKBAR_ID} .qb-icon {
+                #${Config.DOM.QUICKDOCK_ID} .qd-chip:hover { background: #000000; color: #ffffff; }
+                #${Config.DOM.QUICKDOCK_ID} .qd-icon {
                     flex: 0 0 auto;
                     width: 24px; height: 24px; padding: 0;
                     border-radius: 8px; border: 1px solid rgba(0, 0, 0, 0.25);
@@ -552,12 +571,12 @@
                     font-size: 13px; font-weight: 700; line-height: 1; font-family: inherit;
                     cursor: pointer; display: flex; align-items: center; justify-content: center;
                 }
-                #${Config.DOM.QUICKBAR_ID} .qb-icon:hover { background: #000000; color: #ffffff; }
-                #${Config.DOM.QUICKBAR_ID} .qb-empty {
+                #${Config.DOM.QUICKDOCK_ID} .qd-icon:hover { background: #000000; color: #ffffff; }
+                #${Config.DOM.QUICKDOCK_ID} .qd-empty {
                     font-size: 11px; color: ${t.textMuted}; white-space: nowrap; padding: 0 4px;
                 }
                 /* Narrow composers (mobile / split panes): drop the hint text. */
-                #${Config.DOM.QUICKBAR_ID}.compact .qb-empty { display: none; }
+                #${Config.DOM.QUICKDOCK_ID}.compact .qd-empty { display: none; }
       `;
       document.head.appendChild(quickStyle);
     },
@@ -2011,6 +2030,14 @@
       const outlineListEl = document.querySelector(
         `#${Config.DOM.OUTLINE_LIST_ID}`,
       );
+      if (!outlineListEl) {
+        // The outline only exists in the DOM while its own section is open, so
+        // ALT+M / ALT+J from a closed panel (or another section) has nothing to
+        // read. Export the whole conversation rather than failing.
+        rawChatData.messages.forEach((m) =>
+          ChatExporter._selectedMessageIds.add(m.id),
+        );
+      }
       if (outlineListEl) {
         const visibleUserMessageIds = new Set();
         outlineListEl
@@ -2234,11 +2261,12 @@
     _lastProcessedChatUrl: null,
     _initialListenersAttached: false,
     autoScrollEnabled: Store.get(Config.GM_KEYS.AUTO_SCROLL_ENABLED, true),
-    quickBarEnabled: Store.get(Config.GM_KEYS.QUICKBAR_ENABLED, true),
+    quickDockEnabled: Store.get(Config.GM_KEYS.QUICKDOCK_ENABLED, true),
     _activeSectionId: Store.get(Config.GM_KEYS.PANEL_ACTIVE_SECTION, ""),
     _globalCollapsed: Store.get(Config.GM_KEYS.PANEL_GLOBAL_COLLAPSED, false),
     _drag: { active: false, offsetX: 0, offsetY: 0 },
     _sections: {},
+    _sourcePickers: [],
     _platform: null,
 
     /* ---------------- Panel shell + drag ---------------- */
@@ -2249,15 +2277,10 @@
       panel = document.createElement("div");
       panel.id = Config.DOM.PANEL_ID;
 
-      const savedX = Store.get(Config.GM_KEYS.PANEL_POS_X, null);
-      const savedY = Store.get(Config.GM_KEYS.PANEL_POS_Y, null);
-      if (savedX !== null && savedY !== null) {
-        panel.style.left = `${savedX}px`;
-        panel.style.top = `${savedY}px`;
-      } else {
-        panel.style.right = "20px";
-        panel.style.bottom = "20px";
-      }
+      // Default corner. A stored position is applied after the panel is in the
+      // document, since the ratio maths needs its measured size.
+      panel.style.right = "20px";
+      panel.style.bottom = "20px";
       if (UI._globalCollapsed) panel.classList.add("global-collapsed");
 
       const rail = document.createElement("div");
@@ -2326,12 +2349,12 @@
       );
 
       const quickBtn = UI.makeRailButton({
-        id: "quickbar",
-        label: UI.quickBarEnabled ? "QB" : "qb",
-        tooltip: "Quick Bar over the chat input box — toggle (ALT+Q)",
-        onClick: () => UI.toggleQuickBar(),
+        id: "quickdock",
+        label: UI.quickDockEnabled ? "QD" : "qd",
+        tooltip: "Quick Dock over the chat input box — toggle (ALT+Q)",
+        onClick: () => UI.toggleQuickDock(),
       });
-      quickBtn.id = "ai-exporter-rail-quickbar";
+      quickBtn.id = "ai-exporter-rail-quickdock";
       rail.appendChild(quickBtn);
 
       if (UI._platform?.hasAutoScroll) {
@@ -2354,7 +2377,7 @@
         id: "master-eye",
         emoji: "O",
         label: "",
-        tooltip: "Show / Hide AI Exporter Panel",
+        tooltip: "Show / Hide the Floating Dock",
         onClick: () => UI.toggleGlobalCollapse(),
       });
       eyeBtn.id = "ai-exporter-rail-master-eye";
@@ -2383,6 +2406,7 @@
       panel.appendChild(content);
 
       document.body.appendChild(panel);
+      UI.restorePosition(panel);
 
       UI.attachDrag(dots, panel);
       let eyeDragged = false;
@@ -2395,9 +2419,13 @@
       };
 
       UI.clampPanelToViewport(panel);
-      window.addEventListener("resize", () =>
-        UI.clampPanelToViewport(document.getElementById(Config.DOM.PANEL_ID)),
-      );
+      const reposition = () =>
+        UI.clampPanelToViewport(document.getElementById(Config.DOM.PANEL_ID));
+      window.addEventListener("resize", reposition);
+      window.addEventListener("orientationchange", reposition);
+      // On mobile the layout viewport does not change when the URL bar or the
+      // on-screen keyboard slides in — only the visual viewport does.
+      window.visualViewport?.addEventListener("resize", reposition);
       return panel;
     },
 
@@ -2446,18 +2474,17 @@
         if (!UI._drag.active) return;
         const newX = clientX - UI._drag.offsetX;
         const newY = clientY - UI._drag.offsetY;
-        const maxX = window.innerWidth - panel.offsetWidth - 4;
-        const maxY = window.innerHeight - panel.offsetHeight - 4;
-        panel.style.left = `${Math.max(4, Math.min(newX, Math.max(4, maxX)))}px`;
-        panel.style.top = `${Math.max(4, Math.min(newY, Math.max(4, maxY)))}px`;
+        const m = Config.PANEL_EDGE_MARGIN;
+        const maxX = window.innerWidth - panel.offsetWidth - m;
+        const maxY = window.innerHeight - panel.offsetHeight - m;
+        panel.style.left = `${Math.max(m, Math.min(newX, Math.max(m, maxX)))}px`;
+        panel.style.top = `${Math.max(m, Math.min(newY, Math.max(m, maxY)))}px`;
         UI.checkScreenEdgesForContent();
       };
       const endDrag = () => {
         if (!UI._drag.active) return;
         UI._drag.active = false;
-        const rect = panel.getBoundingClientRect();
-        Store.set(Config.GM_KEYS.PANEL_POS_X, Math.round(rect.left));
-        Store.set(Config.GM_KEYS.PANEL_POS_Y, Math.round(rect.top));
+        UI.savePosition(panel);
       };
       handle.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -2469,36 +2496,81 @@
       window.addEventListener("mouseup", endDrag);
     },
 
+    /* ---------------- Floating Dock position ----------------
+     * Stored as a fraction of the free space rather than as pixels.
+     *
+     * With pixels, resizing to a narrower viewport forced a clamp, the clamp
+     * overwrote the saved position, and widening again left the dock wherever
+     * the clamp had put it — so cycling through responsive device sizes walked
+     * it across the screen. A fraction is stable in both directions: a dock
+     * parked on the right edge is at ratio ~1 and stays on the right edge at
+     * every width.
+     */
+    _posRatio: null,
+
+    /** The dock's own left/top. style.* is authoritative once it has moved. */
+    currentLeftTop(panel) {
+      const left = parseFloat(panel.style.left);
+      const top = parseFloat(panel.style.top);
+      if (Number.isFinite(left) && Number.isFinite(top)) return { left, top };
+      const rect = panel.getBoundingClientRect();
+      return { left: rect.left, top: rect.top };
+    },
+
+    /** Room the dock can travel in, once both margins are taken out. */
+    freeSpace(panel) {
+      const m = Config.PANEL_EDGE_MARGIN;
+      return {
+        x: Math.max(0, window.innerWidth - panel.offsetWidth - m * 2),
+        y: Math.max(0, window.innerHeight - panel.offsetHeight - m * 2),
+      };
+    },
+
+    savePosition(panel) {
+      const { left, top } = UI.currentLeftTop(panel);
+      const free = UI.freeSpace(panel);
+      const m = Config.PANEL_EDGE_MARGIN;
+      const clamp01 = (n) => Math.min(1, Math.max(0, n));
+      UI._posRatio = {
+        x: free.x ? clamp01((left - m) / free.x) : 0,
+        y: free.y ? clamp01((top - m) / free.y) : 0,
+      };
+      Store.set(Config.GM_KEYS.PANEL_POS_RATIO_X, UI._posRatio.x);
+      Store.set(Config.GM_KEYS.PANEL_POS_RATIO_Y, UI._posRatio.y);
+    },
+
+    /** Reads the stored ratio, migrating a pixel position from an older build. */
+    restorePosition(panel) {
+      const rx = Store.get(Config.GM_KEYS.PANEL_POS_RATIO_X, null);
+      const ry = Store.get(Config.GM_KEYS.PANEL_POS_RATIO_Y, null);
+      if (rx !== null && ry !== null) {
+        UI._posRatio = { x: Number(rx) || 0, y: Number(ry) || 0 };
+        UI.clampPanelToViewport(panel);
+        return;
+      }
+      const px = Store.get(Config.GM_KEYS.PANEL_POS_X, null);
+      const py = Store.get(Config.GM_KEYS.PANEL_POS_Y, null);
+      if (px === null || py === null) return; // never moved — keep the corner
+      panel.style.left = `${px}px`;
+      panel.style.top = `${py}px`;
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+      UI.savePosition(panel);
+      UI.clampPanelToViewport(panel);
+    },
+
+    /**
+     * Re-derives left/top from the stored ratio. Non-destructive: the ratio is
+     * never rewritten here, only on drag end, so a resize can be undone.
+     */
     clampPanelToViewport(panel) {
       if (!panel) return;
-      const rect = panel.getBoundingClientRect();
-      let left = rect.left;
-      let top = rect.top;
-      let changed = false;
-      const maxX = window.innerWidth - rect.width - 4;
-      const maxY = window.innerHeight - rect.height - 4;
-      if (left > maxX) {
-        left = Math.max(4, maxX);
-        changed = true;
-      }
-      if (top > maxY) {
-        top = Math.max(4, maxY);
-        changed = true;
-      }
-      if (left < 4) {
-        left = 4;
-        changed = true;
-      }
-      if (top < 4) {
-        top = 4;
-        changed = true;
-      }
-      if (changed || panel.style.left) {
-        panel.style.left = `${left}px`;
+      if (UI._posRatio) {
+        const free = UI.freeSpace(panel);
+        const m = Config.PANEL_EDGE_MARGIN;
+        panel.style.left = `${Math.round(m + UI._posRatio.x * free.x)}px`;
+        panel.style.top = `${Math.round(m + UI._posRatio.y * free.y)}px`;
         panel.style.right = "auto";
-      }
-      if (changed || panel.style.top) {
-        panel.style.top = `${top}px`;
         panel.style.bottom = "auto";
       }
       UI.checkScreenEdgesForContent();
@@ -2530,13 +2602,13 @@
       else if (UI._activeSectionId) UI.showSection(UI._activeSectionId);
     },
 
-    toggleQuickBar() {
-      UI.quickBarEnabled = !UI.quickBarEnabled;
-      Store.set(Config.GM_KEYS.QUICKBAR_ENABLED, UI.quickBarEnabled);
-      const btn = document.getElementById("ai-exporter-rail-quickbar");
+    toggleQuickDock() {
+      UI.quickDockEnabled = !UI.quickDockEnabled;
+      Store.set(Config.GM_KEYS.QUICKDOCK_ENABLED, UI.quickDockEnabled);
+      const btn = document.getElementById("ai-exporter-rail-quickdock");
       const labelEl = btn?.querySelector(".rail-icon-text");
-      if (labelEl) labelEl.textContent = UI.quickBarEnabled ? "QB" : "qb";
-      QuickBar.sync();
+      if (labelEl) labelEl.textContent = UI.quickDockEnabled ? "QD" : "qd";
+      QuickDock.sync();
     },
 
     toggleAutoScroll() {
@@ -2560,7 +2632,7 @@
       }
       UI._activeSectionId = id;
       Store.set(Config.GM_KEYS.PANEL_ACTIVE_SECTION, id);
-      // The QuickBar can ask for a section while the rail is collapsed to its
+      // The Quick Dock can ask for a section while the rail is collapsed to its
       // eye; open it back up rather than showing content next to nothing.
       if (UI._globalCollapsed) {
         UI._globalCollapsed = false;
@@ -2603,6 +2675,7 @@
 
     buildAllSections() {
       UI._sections = {};
+      UI._sourcePickers = [];
       UI.sections.registerPromptsSection();
       UI.sections.registerExportSections();
       UI.sections.registerSettingsSection();
@@ -2829,32 +2902,15 @@
       },
 
       /**
-       * The messages behind the "checked items" source: every checked user
-       * message plus the AI replies that follow it.
-       */
-      selectedChatMessages(chatData) {
-        if (!chatData) return [];
-        const selectedIds = new Set();
-        document
-          .getElementById(Config.DOM.OUTLINE_LIST_ID)
-          ?.querySelectorAll(".outline-item-checkbox:checked")
-          .forEach((cb) => {
-            if (cb.dataset.messageId) selectedIds.add(cb.dataset.messageId);
-          });
-        return chatData.messages.filter((m, idx) => {
-          if (m.author === "user") return selectedIds.has(m.id);
-          for (let i = idx - 1; i >= 0; i--)
-            if (chatData.messages[i].author === "user")
-              return selectedIds.has(chatData.messages[i].id);
-          return false;
-        });
-      },
-
-      /**
-       * The "where does this tool read from?" control shared by Snapcompact,
-       * the Text Minifier and the JSON->TOON converter.
+       * The "where does this tool read from?" control shared by the Text
+       * Minifier, the JSON->TOON converter and Snapcompact.
        *
-       * @returns {{select, customInput, getMessages, getText, getJson}}
+       * It carries its own turn checklist rather than reading the export
+       * section's outline list: only one section's body is mounted in the
+       * panel at a time, so that list is simply not in the document while any
+       * of these tools is on screen, and every lookup came back empty.
+       *
+       * @returns {{select, customInput, refresh, getMessages, getText, getJson}}
        */
       buildSourcePicker(wrap, customPlaceholder) {
         const label = document.createElement("label");
@@ -2864,7 +2920,7 @@
 
         const select = document.createElement("select");
         [
-          ["chat-selected", "Current chat — checked items"],
+          ["chat-selected", "Current chat — pick turns"],
           ["chat-all", "Current chat — entire conversation"],
           ["custom", "Custom pasted text"],
         ].forEach(([value, text]) => {
@@ -2876,27 +2932,162 @@
         select.value = "custom";
         wrap.appendChild(select);
 
+        /* ---- per-tool turn checklist (only shown for "pick turns") ---- */
+        const picker = document.createElement("div");
+        picker.className = "ai-exporter-fieldset";
+        picker.hidden = true;
+
+        const headRow = document.createElement("div");
+        headRow.className = "ai-exporter-select-all-row";
+        const masterBox = document.createElement("input");
+        masterBox.type = "checkbox";
+        masterBox.checked = true;
+        headRow.appendChild(masterBox);
+        const headLabel = document.createElement("span");
+        headLabel.textContent = "Select all";
+        headLabel.style.flex = "1";
+        headLabel.style.cursor = "pointer";
+        headRow.appendChild(headLabel);
+        const countPill = document.createElement("span");
+        countPill.className = "ai-exporter-count-pill";
+        countPill.textContent = "0 / 0";
+        headRow.appendChild(countPill);
+        picker.appendChild(headRow);
+
+        const listEl = document.createElement("div");
+        listEl.className = "ai-exporter-msg-list";
+        picker.appendChild(listEl);
+        wrap.appendChild(picker);
+
         const customInput = document.createElement("textarea");
         customInput.style.height = "70px";
         customInput.placeholder = customPlaceholder;
         wrap.appendChild(customInput);
 
-        select.onchange = () => {
-          customInput.style.display =
-            select.value === "custom" ? "block" : "none";
+        // Chosen user-turn ids. `seen` is what makes "new turns arrive
+        // pre-checked" work without also re-checking turns you unticked.
+        const chosen = new Set();
+        const seen = new Set();
+        let signature = "";
+
+        const updateCount = () => {
+          const total = listEl.querySelectorAll("input[type=checkbox]").length;
+          countPill.textContent = `${chosen.size} / ${total}`;
+          masterBox.checked = total > 0 && chosen.size === total;
         };
+
+        const renderChecklist = () => {
+          const chatData = ChatExporter._currentChatData;
+          const userMessages = chatData
+            ? chatData.messages.filter((m) => m.author === "user")
+            : [];
+          const nextSignature = userMessages.map((m) => m.id).join("|");
+          if (nextSignature === signature && listEl.childElementCount) {
+            updateCount();
+            return;
+          }
+          signature = nextSignature;
+
+          const liveIds = new Set(userMessages.map((m) => m.id));
+          [...seen].forEach((id) => {
+            if (!liveIds.has(id)) {
+              seen.delete(id);
+              chosen.delete(id);
+            }
+          });
+
+          while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+
+          if (!userMessages.length) {
+            const empty = document.createElement("div");
+            empty.className = "ai-exporter-empty-note";
+            empty.textContent = "No messages on this page yet.";
+            listEl.appendChild(empty);
+            updateCount();
+            return;
+          }
+
+          userMessages.forEach((msg, i) => {
+            if (!seen.has(msg.id)) {
+              seen.add(msg.id);
+              chosen.add(msg.id); // new turns default to included
+            }
+            const row = document.createElement("div");
+            row.className = "ai-exporter-outline-item";
+            const box = document.createElement("input");
+            box.type = "checkbox";
+            box.checked = chosen.has(msg.id);
+            box.dataset.messageId = msg.id;
+            const text = document.createElement("span");
+            text.textContent = `${i + 1}. ${Utils.truncate(
+              (msg.contentText || "").replace(/\s+/g, " ").trim(),
+              60,
+            )}`;
+            text.title = Utils.truncate(
+              (msg.contentText || "").replace(/\s+/g, " ").trim(),
+              300,
+            );
+            const toggle = () => {
+              if (box.checked) chosen.add(msg.id);
+              else chosen.delete(msg.id);
+              updateCount();
+            };
+            box.onchange = toggle;
+            text.onclick = () => {
+              box.checked = !box.checked;
+              toggle();
+            };
+            row.appendChild(box);
+            row.appendChild(text);
+            listEl.appendChild(row);
+          });
+          updateCount();
+        };
+
+        const setMasterState = (checked) => {
+          listEl.querySelectorAll("input[type=checkbox]").forEach((box) => {
+            box.checked = checked;
+            if (checked) chosen.add(box.dataset.messageId);
+            else chosen.delete(box.dataset.messageId);
+          });
+          updateCount();
+        };
+        masterBox.onchange = () => setMasterState(masterBox.checked);
+        headLabel.onclick = () => {
+          masterBox.checked = !masterBox.checked;
+          setMasterState(masterBox.checked);
+        };
+
+        const applyMode = () => {
+          const mode = select.value;
+          picker.hidden = mode !== "chat-selected";
+          customInput.style.display = mode === "custom" ? "block" : "none";
+          if (mode === "chat-selected") renderChecklist();
+        };
+        select.onchange = applyMode;
+        applyMode();
 
         const getMessages = () => {
           const chatData = ChatExporter._currentChatData;
-          if (!chatData) return [];
-          return select.value === "chat-selected"
-            ? UI.sections.selectedChatMessages(chatData)
-            : chatData.messages;
+          if (!chatData || select.value === "custom") return [];
+          if (select.value === "chat-all") return chatData.messages;
+          // A checked user turn drags its AI replies along with it.
+          return chatData.messages.filter((m, idx) => {
+            if (m.author === "user") return chosen.has(m.id);
+            for (let i = idx - 1; i >= 0; i--)
+              if (chatData.messages[i].author === "user")
+                return chosen.has(chatData.messages[i].id);
+            return false;
+          });
         };
 
-        return {
+        const picked = {
           select,
           customInput,
+          /** Re-reads the conversation; call from the section's onShow. */
+          refresh() {
+            if (select.value === "chat-selected") renderChecklist();
+          },
           getMessages,
           /**
            * Plain-text view of the chosen source. Deliberately keeps the
@@ -2921,7 +3112,7 @@
             const chatData = ChatExporter._currentChatData;
             const messages = getMessages();
             if (!chatData || !messages.length)
-              throw new Error("No chat messages available on this page.");
+              throw new Error("No chat messages selected on this page.");
             return {
               title: chatData.title,
               platform: chatData.platformId,
@@ -2933,6 +3124,11 @@
             };
           },
         };
+
+        // UI.refresh() pings every live picker when the conversation changes,
+        // so an open checklist picks up new turns as they stream in.
+        UI._sourcePickers.push(picked);
+        return picked;
       },
 
       /**
@@ -3225,13 +3421,13 @@
           }
         };
 
-        // Keep the list (and the QuickBar) in step with every store change.
+        // Keep the list (and the QuickDock) in step with every store change.
         PromptStore.subscribe(() => {
           renderList();
-          QuickBar.render();
+          QuickDock.render();
         });
 
-        // Entry point for the QuickBar's "+". showSection() toggles, so only
+        // Entry point for the Quick Dock's "+". showSection() toggles, so only
         // call it when the section is not already the open one.
         UI._openNewPromptForm = () => {
           if (UI._activeSectionId !== "prompts") UI.showSection("prompts");
@@ -3351,7 +3547,11 @@
             copyTextBtn.textContent = "Copied!";
             setTimeout(() => (copyTextBtn.textContent = "Copy Result"), 1500);
           });
-        UI._sections["minifier"] = { title: "Text Minifier", body: wrap };
+        UI._sections["minifier"] = {
+          title: "Text Minifier",
+          body: wrap,
+          onShow: source.refresh,
+        };
       },
 
       registerToonSection() {
@@ -3426,7 +3626,11 @@
             copyJsonBtn.textContent = "Copied!";
             setTimeout(() => (copyJsonBtn.textContent = "Copy TOON"), 1500);
           });
-        UI._sections["toon"] = { title: "JSON -> TOON", body: wrap };
+        UI._sections["toon"] = {
+          title: "JSON -> TOON",
+          body: wrap,
+          onShow: source.refresh,
+        };
       },
 
       registerSnapcompactSection() {
@@ -3434,30 +3638,12 @@
         wrap.style.display = "flex";
         wrap.style.flexDirection = "column";
         wrap.style.gap = "6px";
-        const sourceLabel = document.createElement("label");
-        sourceLabel.className = "ai-exporter-section-label";
-        sourceLabel.textContent = "Source:";
-        wrap.appendChild(sourceLabel);
-        const sourceSelect = document.createElement("select");
-        [
-          ["chat-selected", "Current chat — checked items"],
-          ["chat-all", "Current chat — entire conversation"],
-          ["custom", "Custom pasted text"],
-        ].forEach(([v, l]) => {
-          const opt = document.createElement("option");
-          opt.value = v;
-          opt.textContent = l;
-          sourceSelect.appendChild(opt);
-        });
-        wrap.appendChild(sourceSelect);
-        const customInput = document.createElement("textarea");
-        customInput.style.height = "60px";
-        customInput.style.display = "none";
-        customInput.placeholder = "Paste text here...";
-        wrap.appendChild(customInput);
-        sourceSelect.onchange = () =>
-          (customInput.style.display =
-            sourceSelect.value === "custom" ? "block" : "none");
+        const source = UI.sections.buildSourcePicker(
+          wrap,
+          "Paste text here...",
+        );
+        const sourceSelect = source.select;
+        const customInput = source.customInput;
         const fontLabel = document.createElement("label");
         fontLabel.className = "ai-exporter-section-label";
         fontLabel.textContent = "Density — font size px:";
@@ -3499,13 +3685,7 @@
             }
             text = text.replace(/\s+/g, " ").trim();
           } else {
-            const msgs =
-              sourceSelect.value === "chat-selected"
-                ? UI.sections.selectedChatMessages(
-                    ChatExporter._currentChatData,
-                  )
-                : ChatExporter._currentChatData.messages;
-            text = Snapcompact.serialize(msgs);
+            text = Snapcompact.serialize(source.getMessages());
           }
           return text
             ? Snapcompact.renderPages(text, {
@@ -3516,10 +3696,14 @@
 
         renderBtn.onclick = () => {
           if (!ChatExporter._currentChatData && sourceSelect.value !== "custom")
-            return alert("No chat data found.");
+            return alert("No chat data found on this page.");
           const pages = getPages();
           if (!pages.length)
-            return alert("Nothing to render — selection is empty.");
+            return alert(
+              sourceSelect.value === "chat-selected"
+                ? "Nothing to render — no turns are ticked in the list above."
+                : "Nothing to render — the source is empty.",
+            );
 
           while (results.firstChild) results.removeChild(results.firstChild);
           status.textContent = `${pages.reduce((sum, p) => sum + p.chars, 0).toLocaleString()} chars → ${pages.length} image(s)`;
@@ -3621,7 +3805,11 @@
           });
         };
 
-        UI._sections["snapcompact"] = { title: "Snapcompact", body: wrap };
+        UI._sections["snapcompact"] = {
+          title: "Snapcompact",
+          body: wrap,
+          onShow: source.refresh,
+        };
       },
     },
 
@@ -3643,10 +3831,10 @@
       }
       // The panel stays up even with an empty conversation: on a brand-new
       // chat there are no messages to extract yet, and hiding the panel there
-      // is exactly when the Prompt Library and Quick Bar are most useful.
+      // is exactly when the Prompt Library and Quick Dock are most useful.
       // Only the chat-dependent sections care whether messages exist.
       panel.style.display = "flex";
-      QuickBar.sync();
+      QuickDock.sync();
 
       const freshChatData = ChatExporter.extractChatData(
         UI._platform,
@@ -3672,6 +3860,7 @@
         UI._renderOutlineItemsMd();
       if (typeof UI._renderOutlineItemsJson === "function")
         UI._renderOutlineItemsJson();
+      UI._sourcePickers.forEach((picker) => picker.refresh());
     },
 
     /**
@@ -3900,7 +4089,7 @@
         }
         if (e.altKey && e.code === "KeyQ") {
           e.preventDefault();
-          UI.toggleQuickBar();
+          UI.toggleQuickDock();
         }
         if (UI._platform?.hasAutoScroll && e.altKey && e.code === "KeyA") {
           e.preventDefault();
@@ -3922,7 +4111,7 @@
         setTimeout(() => {
           UI.ensurePanel();
           UI.buildAllSections();
-          QuickBar.start();
+          QuickDock.start();
           UI.refresh();
           if (UI._platform.hasAutoScroll)
             setTimeout(
@@ -3942,7 +4131,7 @@
   };
 
   /* ==========================================================================
-   * 11b. QUICK BAR — a thin strip of prompt chips docked just above the site's
+   * 11b. QUICK DOCK — a thin strip of prompt chips docked just above the site's
    * composer, so a saved prompt is one click away from where you are already
    * typing.
    *
@@ -3951,7 +4140,7 @@
    * injected child gets wiped (or breaks the editor's own DOM assumptions).
    * Staying outside and re-measuring costs one getBoundingClientRect per tick.
    * ========================================================================== */
-  const QuickBar = {
+  const QuickDock = {
     _el: null,
     _scroll: null,
     _target: null,
@@ -3961,17 +4150,17 @@
     _started: false,
 
     ensureEl() {
-      if (QuickBar._el && QuickBar._el.isConnected) return QuickBar._el;
+      if (QuickDock._el && QuickDock._el.isConnected) return QuickDock._el;
       Theme.injectStyles();
       const bar = document.createElement("div");
-      bar.id = Config.DOM.QUICKBAR_ID;
+      bar.id = Config.DOM.QUICKDOCK_ID;
 
       const scroll = document.createElement("div");
-      scroll.className = "qb-scroll";
+      scroll.className = "qd-scroll";
       bar.appendChild(scroll);
 
       const addBtn = document.createElement("button");
-      addBtn.className = "qb-icon";
+      addBtn.className = "qd-icon";
       addBtn.textContent = "+";
       addBtn.title = "Save a new prompt";
       addBtn.onclick = (e) => {
@@ -3982,7 +4171,7 @@
       bar.appendChild(addBtn);
 
       const libBtn = document.createElement("button");
-      libBtn.className = "qb-icon";
+      libBtn.className = "qd-icon";
       libBtn.textContent = "☰";
       libBtn.title = "Open the prompt library";
       libBtn.onclick = (e) => {
@@ -3993,13 +4182,13 @@
       bar.appendChild(libBtn);
 
       const hideBtn = document.createElement("button");
-      hideBtn.className = "qb-icon";
+      hideBtn.className = "qd-icon";
       hideBtn.textContent = "✕";
-      hideBtn.title = "Hide the quick bar (ALT+Q to bring it back)";
+      hideBtn.title = "Hide the Quick Dock (ALT+Q to bring it back)";
       hideBtn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        UI.toggleQuickBar();
+        UI.toggleQuickDock();
       };
       bar.appendChild(hideBtn);
 
@@ -4008,22 +4197,22 @@
       bar.addEventListener("mousedown", (e) => e.preventDefault());
 
       document.body.appendChild(bar);
-      QuickBar._el = bar;
-      QuickBar._scroll = scroll;
-      QuickBar.render();
+      QuickDock._el = bar;
+      QuickDock._scroll = scroll;
+      QuickDock.render();
       return bar;
     },
 
     /** Rebuilds the chip row from the current prompt library. */
     render() {
-      if (!QuickBar._scroll) return;
-      const scroll = QuickBar._scroll;
+      if (!QuickDock._scroll) return;
+      const scroll = QuickDock._scroll;
       while (scroll.firstChild) scroll.removeChild(scroll.firstChild);
 
-      const prompts = PromptStore.list().slice(0, Config.QUICKBAR_MAX_CHIPS);
+      const prompts = PromptStore.list().slice(0, Config.QUICKDOCK_MAX_CHIPS);
       if (!prompts.length) {
         const note = document.createElement("span");
-        note.className = "qb-empty";
+        note.className = "qd-empty";
         note.textContent = "No saved prompts — press + to add one";
         scroll.appendChild(note);
         return;
@@ -4031,7 +4220,7 @@
 
       prompts.forEach((prompt) => {
         const chip = document.createElement("button");
-        chip.className = "qb-chip";
+        chip.className = "qd-chip";
         chip.textContent = prompt.title;
         chip.title = Utils.truncate(prompt.body.replace(/\s+/g, " ").trim(), 220);
         chip.onclick = (e) => {
@@ -4048,7 +4237,7 @@
     },
 
     hide() {
-      if (QuickBar._el) QuickBar._el.classList.remove("visible");
+      if (QuickDock._el) QuickDock._el.classList.remove("visible");
     },
 
     /**
@@ -4056,13 +4245,13 @@
      * to call on every tick: it bails out unless the rect actually moved.
      */
     position() {
-      const bar = QuickBar._el;
-      const target = QuickBar._target;
+      const bar = QuickDock._el;
+      const target = QuickDock._target;
       if (!bar || !target) return;
       const rect = target.getBoundingClientRect();
       const key = `${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)},${Math.round(rect.height)},${Math.round(bar.offsetHeight)}`;
-      if (key === QuickBar._lastRect) return;
-      QuickBar._lastRect = key;
+      if (key === QuickDock._lastRect) return;
+      QuickDock._lastRect = key;
 
       const barHeight = bar.offsetHeight || 32;
       const gap = 6;
@@ -4084,39 +4273,39 @@
     /** Finds/re-finds the composer and shows or hides the bar accordingly. */
     sync() {
       if (!UI._platform) return;
-      if (!UI.quickBarEnabled) {
-        QuickBar.hide();
-        QuickBar._target = null;
+      if (!UI.quickDockEnabled) {
+        QuickDock.hide();
+        QuickDock._target = null;
         return;
       }
-      const bar = QuickBar.ensureEl();
+      const bar = QuickDock.ensureEl();
       const target = Composer.find();
       if (!target) {
-        QuickBar._target = null;
-        QuickBar.hide();
+        QuickDock._target = null;
+        QuickDock.hide();
         return;
       }
-      if (target !== QuickBar._target) {
-        QuickBar._target = target;
-        QuickBar._lastRect = "";
-        if (QuickBar._resizeObserver) {
-          QuickBar._resizeObserver.disconnect();
-          QuickBar._resizeObserver.observe(target);
+      if (target !== QuickDock._target) {
+        QuickDock._target = target;
+        QuickDock._lastRect = "";
+        if (QuickDock._resizeObserver) {
+          QuickDock._resizeObserver.disconnect();
+          QuickDock._resizeObserver.observe(target);
         }
       }
       bar.classList.add("visible");
-      QuickBar.position();
+      QuickDock.position();
     },
 
     /** Installs the listeners that keep the bar glued to a moving composer. */
     start() {
-      if (QuickBar._started) return;
-      QuickBar._started = true;
+      if (QuickDock._started) return;
+      QuickDock._started = true;
 
       if (typeof ResizeObserver === "function") {
-        QuickBar._resizeObserver = new ResizeObserver(() => {
-          QuickBar._lastRect = "";
-          QuickBar.position();
+        QuickDock._resizeObserver = new ResizeObserver(() => {
+          QuickDock._lastRect = "";
+          QuickDock.position();
         });
       }
 
@@ -4127,8 +4316,8 @@
         if (frame) return;
         frame = requestAnimationFrame(() => {
           frame = 0;
-          QuickBar._lastRect = "";
-          QuickBar.position();
+          QuickDock._lastRect = "";
+          QuickDock.position();
         });
       };
       window.addEventListener("resize", reposition);
@@ -4136,16 +4325,16 @@
 
       // The composer grows as you type and is swapped out wholesale on
       // navigation, so a slow poll backs up the observers.
-      QuickBar._timer = setInterval(() => {
-        if (!QuickBar._target || !QuickBar._target.isConnected)
-          QuickBar.sync();
-        else QuickBar.position();
-      }, Config.QUICKBAR_POLL_MS);
+      QuickDock._timer = setInterval(() => {
+        if (!QuickDock._target || !QuickDock._target.isConnected)
+          QuickDock.sync();
+        else QuickDock.position();
+      }, Config.QUICKDOCK_POLL_MS);
 
       // refresh() may already have found a composer before the observer
       // existed; clearing the target makes the next sync re-attach it.
-      QuickBar._target = null;
-      QuickBar.sync();
+      QuickDock._target = null;
+      QuickDock.sync();
     },
   };
 

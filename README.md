@@ -8,9 +8,10 @@ Why scripts: Because i found mostly myself in browser or in terminal. That's all
 
 ### 1. AiUtils (`AiUtil.js`) — [full docs: AIUtil.md](AIUtil.md)
 A dock for ChatGPT, Claude, Copilot, Gemini and Grok. Keeps a Gist-synced
-library of your prompts (with a quick bar over the chat input box so a prompt is
-one click away), exports conversations to Markdown or JSON, and squeezes text
-down with a minifier, a JSON→TOON converter and Snapcompact.
+library of your prompts (with a quick dock over the chat input box so a prompt
+is one click away), exports conversations to Markdown or JSON, and squeezes text
+down with a minifier, a JSON→TOON converter and Snapcompact. Can also be packed
+into a bookmarklet for mobile — see [`bookmarklet.html`](bookmarklet.html).
 
 ### 2. YouTube Notes (`youtubenotes.js`)
 A tool designed to help limit your YouTube usage or use it more wisely. It allows you to:

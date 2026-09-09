@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AiUtil — bookmarklet builder</title>
+<style>
+  :root { color-scheme: light dark; --fg:#111; --bg:#fff; --muted:#666; --line:#000; --accent:#000; --accentfg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#eee; --bg:#141414; --muted:#9a9a9a; --line:#666; --accent:#eee; --accentfg:#111; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px 64px; background:var(--bg); color:var(--fg);
+         font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 28px 0 8px; }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .step { border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .step > :last-child { margin-bottom: 0; }
+  button { font:inherit; font-weight:700; cursor:pointer; border-radius:8px; padding:9px 14px;
+           border:1px solid var(--line); background:var(--accent); color:var(--accentfg); }
+  button.sec { background:transparent; color:var(--fg); font-weight:600; }
+  button:disabled { opacity:.45; cursor:default; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  textarea { width:100%; min-height:110px; font-family:ui-monospace,monospace; font-size:12px;
+             background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  #out { min-height:150px; }
+  #status { font-size:13px; margin-top:10px; white-space:pre-line; }
+  #drag { display:none; margin-top:12px; padding:10px 16px; border:2px dashed var(--line);
+          border-radius:10px; text-decoration:none; color:var(--fg); font-weight:700; }
+  label.opt { display:flex; gap:7px; align-items:center; font-size:13px; margin-bottom:6px; }
+  code { background:rgba(128,128,128,.18); padding:1px 5px; border-radius:4px; font-size:13px; }
+  ol { padding-left: 20px; }
+  li { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>AiUtil — bookmarklet builder</h1>
+  <p class="muted">Turns <code>AiUtil.js</code> into a single <code>javascript:</code> bookmark, so you can
+  run it on a phone or anywhere Tampermonkey is not installed. Everything happens in this page; nothing is uploaded.</p>
+
+  <div class="step">
+    <h2 style="margin-top:0">1 · Load AiUtil.js</h2>
+    <div class="row">
+      <button id="btn-fetch">Load from this folder</button>
+      <button class="sec" id="btn-pick">Choose file…</button>
+      <input type="file" id="file" accept=".js" hidden />
+    </div>
+    <p class="muted" style="margin:10px 0 6px">Opening this page straight off your disk blocks the fetch —
+    use <b>Choose file…</b>, or paste the script below.</p>
+    <textarea id="src" placeholder="…or paste the whole contents of AiUtil.js here"></textarea>
+  </div>
+
+  <div class="step">
+    <h2 style="margin-top:0">2 · Build</h2>
+    <label class="opt"><input type="checkbox" id="opt-min" checked /> Minify first (roughly halves it — recommended)</label>
+    <div class="row"><button id="btn-build" disabled>Build bookmarklet</button></div>
+    <div id="status" class="muted">Load the script first.</div>
+  </div>
+
+  <div class="step">
+    <h2 style="margin-top:0">3 · Take it</h2>
+    <textarea id="out" readonly placeholder="The javascript: URL lands here"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="btn-copy" disabled>Copy</button>
+      <button class="sec" id="btn-dl" disabled>Download as .txt</button>
+    </div>
+    <a id="drag" href="#">▸ AiUtil — drag me to your bookmarks bar</a>
+  </div>
+
+  <h2>Putting it on a phone</h2>
+  <ol>
+    <li>Build it here, press <b>Copy</b>. (Easiest on the phone itself — open this page there.)</li>
+    <li>Bookmark any page, then edit that bookmark: replace its URL with what you copied, and name it <code>AiUtil</code>.</li>
+    <li><b>Chrome / Android:</b> open an AI chat, type <code>AiUtil</code> in the address bar and pick the bookmark from the
+        suggestions. <b>Safari / iOS:</b> save it under Favourites and tap it from the bookmarks menu.</li>
+  </ol>
+
+  <h2>What you give up versus Tampermonkey</h2>
+  <ul class="muted">
+    <li>It runs once per page load — reopen it after a reload.</li>
+    <li>Prompts are stored in that site's <code>localStorage</code> instead of Tampermonkey, so they are
+        <b>per-site</b> and are wiped when you clear site data.</li>
+    <li>Gist sync usually will not work: without <code>GM_xmlhttpRequest</code> the call falls back to
+        <code>fetch()</code>, which these sites' CSP blocks. Sync from the desktop, use prompts here.</li>
+    <li>If your browser refuses to save a bookmark this long, install
+        <a href="https://violentmonkey.github.io/">Violentmonkey</a> on Firefox for Android and use the normal
+        userscript instead — that path has none of these limits.</li>
+  </ul>
+</main>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const src = $("src"), out = $("out"), status = $("status");
+  const TERSER = "https://cdn.jsdelivr.net/npm/terser@5.31.6/dist/bundle.min.js";
+
+  const say = (msg) => { status.textContent = msg; };
+  const kb = (n) => (n / 1024).toFixed(0) + " KB";
+
+  function syncBuildButton() {
+    $("btn-build").disabled = src.value.trim().length < 100;
+    if (!$("btn-build").disabled && !out.value) say("Ready to build.");
+  }
+  src.addEventListener("input", syncBuildButton);
+
+  $("btn-fetch").onclick = async () => {
+    say("Fetching AiUtil.js…");
+    try {
+      const res = await fetch("AiUtil.js");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      src.value = await res.text();
+      say("Loaded " + kb(src.value.length) + " of source.");
+    } catch (e) {
+      say("Could not fetch it (" + e.message + "). Use “Choose file…” or paste it in.");
+    }
+    syncBuildButton();
+  };
+
+  $("btn-pick").onclick = () => $("file").click();
+  $("file").onchange = (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => { src.value = r.result; say("Loaded " + kb(src.value.length) + " of source."); syncBuildButton(); };
+    r.readAsText(f);
+  };
+
+  function loadTerser() {
+    if (window.Terser) return Promise.resolve(window.Terser);
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = TERSER;
+      s.onload = () => resolve(window.Terser);
+      s.onerror = () => reject(new Error("CDN unreachable"));
+      document.head.appendChild(s);
+    });
+  }
+
+  // Tampermonkey's GM_* API does not exist outside a userscript manager, so
+  // stand in for the pieces AiUtil actually uses. GM_xmlhttpRequest is left
+  // undefined on purpose: Net.request tests for it and falls back to fetch().
+  function wrap(code) {
+    return (
+      "(function(){" +
+      "if(window.__aiUtilBookmarklet){alert('AiUtil is already running on this page.');return;}" +
+      "window.__aiUtilBookmarklet=1;" +
+      "var P='aiUtil_bm_';" +
+      "window.GM_getValue=function(k,d){try{var v=localStorage.getItem(P+k);" +
+      "return v===null?d:JSON.parse(v);}catch(e){return d;}};" +
+      "window.GM_setValue=function(k,v){try{localStorage.setItem(P+k,JSON.stringify(v));}catch(e){}};" +
+      "window.GM_registerMenuCommand=function(){};" +
+      code +
+      "})();"
+    );
+  }
+
+  $("btn-build").onclick = async () => {
+    const raw = src.value;
+    let code = raw;
+    $("btn-build").disabled = true;
+
+    if ($("opt-min").checked) {
+      say("Minifying…");
+      try {
+        const Terser = await loadTerser();
+        const res = await Terser.minify(raw, { compress: true, mangle: true });
+        if (res.error) throw res.error;
+        code = res.code;
+      } catch (e) {
+        say("Minifier unavailable (" + e.message + ") — building unminified.");
+      }
+    }
+
+    const url = "javascript:" + encodeURIComponent(wrap(code));
+    out.value = url;
+    $("btn-copy").disabled = $("btn-dl").disabled = false;
+    const drag = $("drag");
+    drag.href = url;
+    drag.style.display = "inline-block";
+    $("btn-build").disabled = false;
+
+    const warn = url.length > 200000
+      ? "\nThat is long. Some browsers cap bookmark URLs — if saving fails, see the Violentmonkey note below."
+      : "";
+    say("Built: " + kb(raw.length) + " source → " + kb(code.length) + " code → " +
+        kb(url.length) + " bookmarklet." + warn);
+  };
+
+  $("btn-copy").onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(out.value);
+      $("btn-copy").textContent = "Copied";
+    } catch (e) {
+      out.select();
+      $("btn-copy").textContent = "Select + copy manually";
+    }
+    setTimeout(() => ($("btn-copy").textContent = "Copy"), 2000);
+  };
+
+  $("btn-dl").onclick = () => {
+    const blob = new Blob([out.value], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "aiutil-bookmarklet.txt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+})();
+</script>
+</body>
+</html>

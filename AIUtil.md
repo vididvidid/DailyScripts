@@ -18,11 +18,19 @@ makes is to `api.github.com`, and only if you turn on Gist sync.
 | Gemini | `gemini.google.com` |
 | Grok | `grok.com` |
 
-## The dock
+## Two docks
 
-The dock is the vertical icon rail that floats over the page. Drag it by the
-`::` handle; click the round eye at the bottom to collapse it to a single dot.
-Its position and collapsed state are remembered.
+There are two pieces of UI, and the rest of this file uses these names:
+
+- **Floating Dock** — the vertical icon rail with the full menu. Drag it by the
+  `::` handle; click the round eye at the bottom to collapse it to a single dot.
+- **Quick Dock** — the thin strip of prompt chips that glues itself over the
+  chat input box.
+
+The Floating Dock remembers where you put it as a *fraction of the viewport*,
+not as pixel coordinates, so it holds the same relative spot when the window
+resizes or you cycle through device sizes in responsive mode. Parked on the
+right edge, it stays on the right edge at every width.
 
 | Icon | Tool | Shortcut |
 | --- | --- | --- |
@@ -33,7 +41,7 @@ Its position and collapsed state are remembered.
 | `JT` | JSON → TOON converter | |
 | `TM` | Text Minifier | |
 | `IC` | Snapcompact (chat → dense PNG) | |
-| `QB` | Show/hide the Quick Bar | `ALT+Q` |
+| `QD` | Show/hide the Quick Dock | `ALT+Q` |
 | `^` | Auto-scroll (Gemini only) | `ALT+A` |
 
 ## Prompt Library
@@ -90,7 +98,7 @@ The token is stored locally by Tampermonkey and is only ever sent to
 stub needs `@grant GM_xmlhttpRequest` and `@connect api.github.com`. Without
 them the script will tell you so rather than failing quietly.
 
-## Quick Bar
+## Quick Dock
 
 A thin strip of prompt chips that docks itself just above the chat input box,
 wherever that box happens to be. Click a chip to insert that prompt. It sits at
@@ -98,9 +106,9 @@ wherever that box happens to be. Click a chip to insert that prompt. It sits at
 
 - `+` — save a new prompt (opens the library's form)
 - `☰` — open the full Prompt Library
-- `✕` — hide the bar (`ALT+Q` brings it back)
+- `✕` — hide the dock (`ALT+Q` brings it back)
 
-The bar is a `position: fixed` element rather than something injected into the
+The Quick Dock is a `position: fixed` element rather than something injected into the
 composer, because every one of these sites re-renders its composer subtree
 constantly and would wipe an injected child. It re-measures the composer on
 resize, on scroll, and on a slow poll, so it follows the box as it grows while
@@ -132,9 +140,15 @@ the title `Refactor the parser` and the tags `work`, `urgent`.
 
 All three read from the same **Source** picker:
 
-- **Current chat — checked items** — the turns ticked in the export list
+- **Current chat — pick turns** — shows a checklist of every user turn right
+  inside the tool; tick the ones you want. Everything starts ticked, `Select
+  all` flips them together, and turns that arrive while you are working show up
+  pre-ticked. A ticked turn brings its AI replies with it.
 - **Current chat — entire conversation** — everything
 - **Custom pasted text** — whatever you type or load
+
+Each tool keeps its own checklist, so a selection in the Minifier does not
+disturb one in Snapcompact.
 
 **Text Minifier** collapses runs of whitespace to single spaces and reports how
 many characters that saved.
@@ -148,6 +162,49 @@ converts pasted JSON or a loaded `.json` file.
 rough token estimate, for when pasting an image is cheaper than pasting text.
 If it all fits on one page you also get *Copy Image & Open New Chat*.
 
+## Use it on a phone — bookmarklet
+
+Tampermonkey does not exist on most mobile browsers, so AiUtil can also be
+packed into a single `javascript:` bookmark.
+
+### ▸ [**Open the bookmarklet builder**](bookmarklet.html)
+
+`bookmarklet.html` sits next to this file in the repo. Open it, load `AiUtil.js`
+(button, file picker, or paste), press **Build bookmarklet**, then **Copy**.
+Leave *Minify first* ticked — it takes the result from about 300 KB down to
+about 130 KB, which matters when your browser has to store it as a bookmark URL.
+
+Because GitHub renders Markdown without scripts, the builder has to be its own
+page — open it from a local clone, or from GitHub Pages if you publish the repo.
+The **Load from this folder** button only works when the page is served over
+`http(s)`; opening it straight off disk blocks the fetch, so use **Choose
+file…** there.
+
+### Installing it on the phone
+
+1. Build and copy the bookmarklet (easiest on the phone itself).
+2. Bookmark any page, edit that bookmark, replace the URL with what you copied,
+   and name it `AiUtil`.
+3. **Chrome / Android** — open an AI chat, type `AiUtil` in the address bar and
+   choose the bookmark from the suggestions.
+   **Safari / iOS** — save it in Favourites and tap it from the bookmarks menu.
+
+### What the bookmarklet gives up
+
+The builder wraps the script in stand-ins for the Tampermonkey API, which
+changes a few things:
+
+- It runs once per page load — tap it again after a reload.
+- Prompts go to that site's `localStorage` rather than Tampermonkey storage, so
+  they are **per-site** and are lost if you clear site data.
+- Gist sync will usually fail. Without `GM_xmlhttpRequest` the request falls
+  back to `fetch()`, which these sites' CSP blocks. Sync on the desktop; use the
+  prompts on mobile.
+- Some browsers cap how long a bookmark URL may be. If yours refuses it, install
+  [Violentmonkey](https://violentmonkey.github.io/) on Firefox for Android and
+  run the normal userscript — that path has none of these limits and is the
+  better mobile setup if it is available to you.
+
 ## Auto-scroll (Gemini)
 
 Gemini lazy-loads history upward, so an export would otherwise only capture
@@ -156,8 +213,8 @@ conversation to the top first. Toggle it with `^` on the rail or `ALT+A`.
 
 ## Notes
 
-- The dock stays visible on a brand-new empty chat — that is exactly when the
-  Prompt Library and Quick Bar are most useful. The export sections simply
+- The Floating Dock stays visible on a brand-new empty chat — that is exactly when the
+  Prompt Library and Quick Dock are most useful. The export sections simply
   report that there is nothing to export yet.
 - Keyboard shortcuts are ignored while you are typing in an input, textarea or
   contenteditable.
