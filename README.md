@@ -6,8 +6,11 @@ Why scripts: Because i found mostly myself in browser or in terminal. That's all
 
 ## Scripts Included
 
-### 1. AiUtils (`AiUtil.js`)
-A compilation of various tools and scripts found over the internet to help you use AI more efficiently. It includes tools for downloading chat conversations, minifying JSON/text content for efficient storage and processing, and more.
+### 1. AiUtils (`AiUtil.js`) — [full docs: AIUtil.md](AIUtil.md)
+A dock for ChatGPT, Claude, Copilot, Gemini and Grok. Keeps a Gist-synced
+library of your prompts (with a quick bar over the chat input box so a prompt is
+one click away), exports conversations to Markdown or JSON, and squeezes text
+down with a minifier, a JSON→TOON converter and Snapcompact.
 
 ### 2. YouTube Notes (`youtubenotes.js`)
 A tool designed to help limit your YouTube usage or use it more wisely. It allows you to:

@@ -8,6 +8,12 @@
  * - tampermonkey extension -> dashboard -> setting 
  *                -> config mode = advanced
  *                -> externals = always
+ *
+ * Notes on the grants below:
+ * - GM_xmlhttpRequest + @connect api.github.com are what let AiUtil.js sync the
+ *   prompt library to a GitHub Gist. The AI chat sites' CSP blocks a plain
+ *   fetch() to api.github.com, so without these the sync silently fails.
+ * - Drop both lines if you do not use the prompt library.
  */
 
 // ==UserScript==
@@ -21,7 +27,10 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @connect      api.github.com
 // @run-at       document-idle
 // ==/UserScript==
 

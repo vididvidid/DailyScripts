@@ -12,13 +12,21 @@
  *               md download
  *               URL way to detect page change
  *               Auto scroll for lazy loading
+ *
+ *  0.2.0        Prompt Library (save / edit / delete prompts)
+ *               GitHub Gist sync for the prompt library
+ *               Quick Bar — floating prompt strip docked over the site's
+ *               composer/input box; click a prompt to insert it
+ *               Chat-source picker (selected / entire chat / custom) for the
+ *               Text Minifier and JSON->TOON tools
+ *               Panel now shows on empty/new chats instead of hiding
  */
 
 // ==UserScript==
 // @name         ChatGPT / Claude / Copilot / Gemini / Grok AI Chat Exporter by RevivalStack
 // @namespace    [old]https://github.com/revivalstack/chatgpt-exporter
-// @version      3.6.0
-// @description  Export your ChatGPT, Claude, Copilot, Gemini or Grok chat into a properly and elegantly formatted Markdown or JSON. Includes Text Minifier, JSON→TOON converter and Snapcompact — in one draggable, two-column icon-dock panel.
+// @version      3.7.0
+// @description  Export your ChatGPT, Claude, Copilot, Gemini or Grok chat into a properly and elegantly formatted Markdown or JSON. Includes a Gist-synced Prompt Library with a quick bar over the site's input box, Text Minifier, JSON→TOON converter and Snapcompact — in one draggable, two-column icon-dock panel.
 // @author       vididvidid, Mic Mejia (Refactored UI)
 // @license      MIT License
 // @match        https://chat.openai.com/*
@@ -30,6 +38,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      api.github.com
 // @noframes
 // ==/UserScript==
 
@@ -43,17 +53,22 @@
  *   1. Config        - constants, GM storage keys, defaults (no logic)
  *   2. Theme          - design tokens + stylesheet injection (no logic)
  *   3. Utils          - small, pure, stateless helper functions
- *   4. Lib            - vendored third-party-style libs (Turndown, TOON)
- *   5. Snapcompact    - "chat -> compact PNG" rendering engine
- *   6. Platforms      - one adapter per AI site (THE extension point).
+ *   4. Net            - GM_xmlhttpRequest/fetch wrapper (CSP-proof HTTP)
+ *   5. Lib            - vendored third-party-style libs (Turndown, TOON)
+ *   6. Snapcompact    - "chat -> compact PNG" rendering engine
+ *   7. Platforms      - one adapter per AI site (THE extension point).
  *                       To support a new site: add one object here, done.
- *   7. ChatExporter   - core domain logic: extract -> format -> download.
+ *   8. PromptStore    - prompt library CRUD + GitHub Gist sync
+ *   9. Composer       - finds the site's input box and types text into it
+ *  10. ChatExporter   - core domain logic: extract -> format -> download.
  *                       Delegates all site-specific work to Platforms.
- *   8. UI             - panel shell, drag handling, sections (the "app").
- *   9. Bootstrap      - wires everything together and starts the script.
+ *  11. UI             - panel shell, drag handling, sections (the "app"),
+ *                       plus QuickBar (the strip docked over the composer).
+ *  12. Bootstrap      - wires everything together and starts the script.
  *
  * To add a new export format:      add a formatter in ChatExporter.formatters
  * To add a new AI site:            add an entry to Platforms.registry
+ *                                  (include composerSelectors for the QuickBar)
  * To add a new panel feature:      add a "section" module under UI.sections
  * To change colors/spacing:        edit Theme.tokens only
  * ============================================================================
@@ -65,9 +80,13 @@
    * 1. CONFIG — constants & persisted-setting keys. No logic lives here.
    * ========================================================================== */
   const Config = {
-    VERSION: "3.6.0",
+    VERSION: "3.7.0",
     DOM_READY_TIMEOUT_MS: 1000,
     AUTOSCROLL_INITIAL_DELAY_MS: 2000,
+
+    // How often the QuickBar re-checks that it is still glued to the composer.
+    QUICKBAR_POLL_MS: 600,
+    QUICKBAR_MAX_CHIPS: 12,
 
     DEFAULT_CHAT_TITLE: "chat",
     DEFAULT_OUTPUT_FILE_FORMAT: "{platform}_{title}_{timestampLocal}",
@@ -77,6 +96,17 @@
       PANEL_ID: "ai-exporter-panel",
       PANEL_BODY_ID: "ai-exporter-panel-body",
       OUTLINE_LIST_ID: "ai-exporter-outline-list",
+      QUICKBAR_ID: "ai-exporter-quickbar",
+    },
+
+    // GitHub Gist is the sync backend for the prompt library. A single secret
+    // gist holds one JSON file; the token needs only the "gist" scope.
+    GIST: {
+      API: "https://api.github.com",
+      FILENAME: "aiutil-prompts.json",
+      DESCRIPTION: "AiUtil prompt library",
+      SCHEMA_VERSION: 1,
+      TIMEOUT_MS: 20000,
     },
 
     // Tampermonkey GM_* storage keys, centralized so nothing is a magic string.
@@ -88,6 +118,11 @@
       PANEL_ACTIVE_SECTION: "aiChatExporter_panelActiveSection",
       CHAT_TITLE_PREFIX: "aiChatExporter_chatTitlePrefix",
       AUTO_SCROLL_ENABLED: "gm_auto_scroll_enabled",
+      PROMPTS: "aiUtil_prompts",
+      GIST_TOKEN: "aiUtil_gistToken",
+      GIST_ID: "aiUtil_gistId",
+      GIST_LAST_SYNC: "aiUtil_gistLastSync",
+      QUICKBAR_ENABLED: "aiUtil_quickbarEnabled",
     },
 
     MARKDOWN: {
@@ -375,12 +410,14 @@
                     padding: 2px 7px; border-radius: 20px;
                 }
                 #${Config.DOM.PANEL_ID} input[type="text"], #${Config.DOM.PANEL_ID} textarea,
-                #${Config.DOM.PANEL_ID} select, #${Config.DOM.PANEL_ID} input[type="number"] {
+                #${Config.DOM.PANEL_ID} select, #${Config.DOM.PANEL_ID} input[type="number"],
+                #${Config.DOM.PANEL_ID} input[type="password"] {
                     width: 100%; background: ${t.inputBg}; color: ${t.inputText};
                     border: 1px solid ${t.borderSoft}; border-radius: 6px;
                     padding: 6px 8px; font-size: 12px; font-family: ${Theme.fontStack};
                 }
-                #${Config.DOM.PANEL_ID} input[type="text"]:focus, #${Config.DOM.PANEL_ID} textarea:focus { outline: 2px solid #000000; }
+                #${Config.DOM.PANEL_ID} input[type="text"]:focus, #${Config.DOM.PANEL_ID} textarea:focus,
+                #${Config.DOM.PANEL_ID} input[type="password"]:focus { outline: 2px solid #000000; }
                 #${Config.DOM.PANEL_ID} textarea { resize: vertical; font-family: monospace; }
                 .ai-exporter-select-all-row {
                     display: flex; align-items: center; gap: 6px; font-size: 11px;
@@ -412,12 +449,117 @@
                 }
                 .ai-exporter-section-label { font-weight: 600; display: block; margin-bottom: 4px; }
 
+                /* ---------- Prompt library ---------- */
+                .ai-exporter-prompt-list {
+                    display: flex; flex-direction: column; gap: 4px;
+                    max-height: 260px; overflow-y: auto;
+                }
+                .ai-exporter-prompt-row {
+                    display: flex; align-items: center; gap: 4px;
+                    border: 1px solid ${t.borderSoft}; border-radius: 8px;
+                    padding: 5px 6px; background: #ffffff;
+                }
+                .ai-exporter-prompt-row:hover { background: #f5f5f5; }
+                .ai-exporter-prompt-main {
+                    flex: 1; min-width: 0; cursor: pointer; text-align: left;
+                    background: none; border: none; padding: 0; font-family: inherit;
+                }
+                .ai-exporter-prompt-title {
+                    font-size: 12px; font-weight: 700; color: ${t.textLight};
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                }
+                .ai-exporter-prompt-preview {
+                    font-size: 10.5px; color: ${t.textMuted};
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                }
+                .ai-exporter-prompt-actions { display: flex; gap: 2px; flex-shrink: 0; }
+                .ai-exporter-mini-btn {
+                    width: 22px; height: 22px; border-radius: 6px; cursor: pointer;
+                    border: 1px solid ${t.borderSoft}; background: #ffffff;
+                    color: ${t.textMuted}; font-size: 11px; line-height: 1;
+                    display: flex; align-items: center; justify-content: center; padding: 0;
+                }
+                .ai-exporter-mini-btn:hover { background: #000000; color: #ffffff; border-color: #000000; }
+                .ai-exporter-empty-note {
+                    font-size: 11px; color: ${t.textMuted}; text-align: center;
+                    padding: 10px 6px; border: 1px dashed ${t.borderSoft}; border-radius: 8px;
+                }
+                .ai-exporter-fieldset {
+                    border: 1px solid ${t.borderSoft}; border-radius: 8px; padding: 8px;
+                    display: flex; flex-direction: column; gap: 6px;
+                }
+                .ai-exporter-fieldset[hidden] { display: none; }
+                .ai-exporter-divider {
+                    border-top: 1px dashed ${t.borderSoft}; margin: 2px 0 0 0; padding-top: 6px;
+                }
+
                 #${Config.DOM.PANEL_ID} ::-webkit-scrollbar { width: 7px; }
                 #${Config.DOM.PANEL_ID} ::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.4); border-radius: 6px; }
                 #${Config.DOM.PANEL_ID} ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.05); }
                 #${Config.DOM.PANEL_ID} { scrollbar-color: rgba(0, 0, 0, 0.4) rgba(0, 0, 0, 0.05); scrollbar-width: thin; }
             `;
       document.head.appendChild(style);
+
+      /* Injected separately: the QuickBar lives outside the panel, docked over
+       * the host site's composer, so it cannot inherit the panel's styles. */
+      const quickStyle = document.createElement("style");
+      quickStyle.id = "ai-exporter-quickbar-styles";
+      quickStyle.textContent = `
+                #${Config.DOM.QUICKBAR_ID} {
+                    position: fixed;
+                    z-index: 2147482000;
+                    display: none;
+                    align-items: center;
+                    gap: 5px;
+                    padding: 4px 5px;
+                    border-radius: 10px;
+                    background: rgba(255, 255, 255, 0.96);
+                    border: 1px solid rgba(0, 0, 0, 0.9);
+                    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+                    font-family: ${Theme.fontStack};
+                    color: ${t.textLight};
+                    backdrop-filter: blur(6px);
+                    max-width: calc(100vw - 16px);
+                    box-sizing: border-box;
+                    opacity: 0.55;
+                    transition: opacity 0.15s ease;
+                }
+                #${Config.DOM.QUICKBAR_ID}.visible { display: flex; }
+                #${Config.DOM.QUICKBAR_ID}:hover { opacity: 1; }
+                #${Config.DOM.QUICKBAR_ID} * { box-sizing: border-box; }
+                #${Config.DOM.QUICKBAR_ID} .qb-scroll {
+                    display: flex; align-items: center; gap: 5px;
+                    overflow-x: auto; overflow-y: hidden;
+                    flex: 1; min-width: 0; scrollbar-width: none;
+                    scroll-behavior: smooth;
+                }
+                #${Config.DOM.QUICKBAR_ID} .qb-scroll::-webkit-scrollbar { height: 0; }
+                #${Config.DOM.QUICKBAR_ID} .qb-chip {
+                    flex: 0 0 auto; max-width: 190px;
+                    height: 24px; padding: 0 9px;
+                    border-radius: 12px; border: 1px solid rgba(0, 0, 0, 0.25);
+                    background: #ffffff; color: #000000;
+                    font-size: 11.5px; font-weight: 600; font-family: inherit;
+                    cursor: pointer; white-space: nowrap;
+                    overflow: hidden; text-overflow: ellipsis;
+                }
+                #${Config.DOM.QUICKBAR_ID} .qb-chip:hover { background: #000000; color: #ffffff; }
+                #${Config.DOM.QUICKBAR_ID} .qb-icon {
+                    flex: 0 0 auto;
+                    width: 24px; height: 24px; padding: 0;
+                    border-radius: 8px; border: 1px solid rgba(0, 0, 0, 0.25);
+                    background: #ffffff; color: #000000;
+                    font-size: 13px; font-weight: 700; line-height: 1; font-family: inherit;
+                    cursor: pointer; display: flex; align-items: center; justify-content: center;
+                }
+                #${Config.DOM.QUICKBAR_ID} .qb-icon:hover { background: #000000; color: #ffffff; }
+                #${Config.DOM.QUICKBAR_ID} .qb-empty {
+                    font-size: 11px; color: ${t.textMuted}; white-space: nowrap; padding: 0 4px;
+                }
+                /* Narrow composers (mobile / split panes): drop the hint text. */
+                #${Config.DOM.QUICKBAR_ID}.compact .qb-empty { display: none; }
+      `;
+      document.head.appendChild(quickStyle);
     },
   };
 
@@ -527,7 +669,71 @@
   };
 
   /* ==========================================================================
-   * 4. LIB — small vendored libraries. Framework-agnostic, no Config/Theme deps.
+   * 4. NET — one HTTP entry point for the whole script.
+   *
+   * AI chat sites ship strict Content-Security-Policies, so a plain fetch() to
+   * api.github.com is usually blocked before it leaves the page. GM_xmlhttpRequest
+   * runs outside the page context and is not subject to that CSP, so it is the
+   * preferred path; fetch() is only a fallback for when the userscript stub was
+   * installed without the @grant.
+   * ========================================================================== */
+  const Net = {
+    /** @returns {Promise<{status:number, text:string}>} */
+    request({ method = "GET", url, headers = {}, body = null }) {
+      return new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest === "function") {
+          GM_xmlhttpRequest({
+            method,
+            url,
+            headers,
+            data: body,
+            timeout: Config.GIST.TIMEOUT_MS,
+            onload: (res) =>
+              resolve({ status: res.status, text: res.responseText || "" }),
+            onerror: () =>
+              reject(
+                new Error(
+                  "Network error. Check that your Tampermonkey stub grants " +
+                    "GM_xmlhttpRequest and @connect api.github.com.",
+                ),
+              ),
+            ontimeout: () => reject(new Error("Request timed out.")),
+          });
+          return;
+        }
+        fetch(url, { method, headers, body })
+          .then((r) => r.text().then((text) => resolve({ status: r.status, text })))
+          .catch((e) =>
+            reject(
+              new Error(
+                `${e.message} — the page's CSP likely blocked it. Add ` +
+                  "'@grant GM_xmlhttpRequest' and '@connect api.github.com' to your stub.",
+              ),
+            ),
+          );
+      });
+    },
+
+    /** Same as request(), but parses JSON and turns non-2xx into an Error. */
+    async json(opts) {
+      const res = await Net.request(opts);
+      let parsed = null;
+      try {
+        parsed = res.text ? JSON.parse(res.text) : null;
+      } catch (e) {
+        if (res.status >= 200 && res.status < 300)
+          throw new Error("GitHub returned a non-JSON response.");
+      }
+      if (res.status < 200 || res.status >= 300) {
+        const detail = (parsed && parsed.message) || res.text.slice(0, 200);
+        throw new Error(`HTTP ${res.status}: ${detail || "request failed"}`);
+      }
+      return parsed;
+    },
+  };
+
+  /* ==========================================================================
+   * 5. LIB — small vendored libraries. Framework-agnostic, no Config/Theme deps.
    * ========================================================================== */
   const Lib = {};
 
@@ -639,7 +845,7 @@
   };
 
   /* ==========================================================================
-   * 5. SNAPCOMPACT — renders serialized chat text into dense PNG "pages".
+   * 6. SNAPCOMPACT — renders serialized chat text into dense PNG "pages".
    * ========================================================================== */
   const Snapcompact = {
     FONT_FAMILY: '"Courier New", Courier, monospace',
@@ -739,7 +945,7 @@
   };
 
   /* ==========================================================================
-     * 6. PLATFORMS — one adapter per AI chat site. THIS IS THE EXTENSION POINT.
+     * 7. PLATFORMS — one adapter per AI chat site. THIS IS THE EXTENSION POINT.
      *
      * Each provider implements a small, consistent interface:
      *   {
@@ -752,7 +958,7 @@
      *     onAfterInit()                   -> void       — optional, e.g. Gemini auto-scroll
      *   }
      *
-  xporter and UI never branch on "if platform === X" — they only ever
+     * ChatExporter and UI never branch on "if platform === X" — they only ever
      * call through this interface, so adding a new site never touches them.
      * ========================================================================== */
   const Platforms = { registry: {} };
@@ -773,6 +979,12 @@
     id: "chatgpt",
     hostnames: ["chat.openai.com", "chatgpt.com"],
     newChatUrl: "https://chatgpt.com/",
+    // Ordered best-guess first; Composer.find() takes the first visible hit.
+    composerSelectors: [
+      "#prompt-textarea",
+      "form div[contenteditable='true']",
+      "form textarea",
+    ],
     selectors: {
       article:
         "section[data-turn-role], section[data-testid^='conversation-turn-']",
@@ -887,6 +1099,11 @@
     id: "claude",
     hostnames: ["claude.ai"],
     newChatUrl: "https://claude.ai/new",
+    composerSelectors: [
+      "div[contenteditable='true'].ProseMirror",
+      "fieldset div[contenteditable='true']",
+      "div[contenteditable='true']",
+    ],
     selectors: {
       message:
         ".font-claude-response:not(#markdown-artifact), [data-testid='user-message']",
@@ -963,6 +1180,11 @@
     id: "copilot",
     hostnames: ["www.copilot.com"],
     newChatUrl: "https://copilot.microsoft.com/",
+    composerSelectors: [
+      "textarea#userInput",
+      "textarea[data-testid='composer-input']",
+      "form textarea",
+    ],
     selectors: {
       message: ".group\\/user-message, .group\\/ai-message",
       userMessage: ".group\\/user-message",
@@ -1048,6 +1270,11 @@
     id: "gemini",
     hostnames: ["gemini.google.com"],
     newChatUrl: "https://gemini.google.com/app",
+    composerSelectors: [
+      "rich-textarea div.ql-editor[contenteditable='true']",
+      "div.ql-editor[contenteditable='true']",
+      "div[contenteditable='true']",
+    ],
     hasAutoScroll: true, // Gemini lazy-loads history upward; needs the auto-scroll feature.
     selectors: {
       messageItem: "user-query, model-response",
@@ -1162,6 +1389,11 @@
     id: "grok",
     hostnames: ["grok.com"],
     newChatUrl: "https://grok.com/",
+    composerSelectors: [
+      "form textarea",
+      "textarea[aria-label]",
+      "div[contenteditable='true']",
+    ],
     selectors: {
       message: "div[id^='response-']",
       content: ".response-content-markdown",
@@ -1245,9 +1477,400 @@
   };
 
   /* ==========================================================================
-   * 7. CHAT EXPORTER — domain logic: extract -> format -> download.
+   * 8. PROMPT STORE — the prompt library and its GitHub Gist sync.
+   *
+   * Local-first: every prompt lives in GM storage and works offline. A single
+   * secret gist is an optional mirror so the same library follows you across
+   * browsers and machines.
+   *
+   * A prompt is { id, title, body, createdAt, updatedAt, deleted? }.
+   * Deletes leave a tombstone (deleted: true) rather than dropping the record,
+   * otherwise a pull from an out-of-date gist would resurrect it. Merging is
+   * last-write-wins per id, compared on updatedAt.
+   * ========================================================================== */
+  const PromptStore = {
+    _prompts: null,
+    _listeners: new Set(),
+
+    /** Lazily reads GM storage. Tolerates both array and JSON-string values. */
+    load() {
+      if (PromptStore._prompts) return PromptStore._prompts;
+      const raw = Store.get(Config.GM_KEYS.PROMPTS, "[]");
+      let parsed = raw;
+      if (typeof raw === "string") {
+        try {
+          parsed = JSON.parse(raw || "[]");
+        } catch (e) {
+          parsed = [];
+        }
+      }
+      PromptStore._prompts = Array.isArray(parsed) ? parsed : [];
+      return PromptStore._prompts;
+    },
+
+    /** Live prompts only (tombstones filtered out), sorted by title. */
+    list() {
+      return PromptStore.load()
+        .filter((p) => p && !p.deleted && p.title)
+        .sort((a, b) =>
+          String(a.title).localeCompare(String(b.title), undefined, {
+            sensitivity: "base",
+          }),
+        );
+    },
+
+    get(id) {
+      return PromptStore.load().find((p) => p.id === id) || null;
+    },
+
+    persist() {
+      Store.set(Config.GM_KEYS.PROMPTS, JSON.stringify(PromptStore.load()));
+      PromptStore._listeners.forEach((fn) => {
+        try {
+          fn();
+        } catch (e) {
+          /* a broken listener must not break the save */
+        }
+      });
+    },
+
+    /** @returns {() => void} an unsubscribe function. */
+    subscribe(fn) {
+      PromptStore._listeners.add(fn);
+      return () => PromptStore._listeners.delete(fn);
+    },
+
+    add(title, body) {
+      const now = new Date().toISOString();
+      const prompt = {
+        id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        title: String(title || "").trim() || "Untitled prompt",
+        body: String(body || ""),
+        createdAt: now,
+        updatedAt: now,
+      };
+      PromptStore.load().push(prompt);
+      PromptStore.persist();
+      return prompt;
+    },
+
+    update(id, patch) {
+      const prompt = PromptStore.get(id);
+      if (!prompt) return null;
+      Object.assign(prompt, patch, { updatedAt: new Date().toISOString() });
+      PromptStore.persist();
+      return prompt;
+    },
+
+    remove(id) {
+      const prompt = PromptStore.get(id);
+      if (!prompt) return false;
+      prompt.deleted = true;
+      prompt.body = "";
+      prompt.updatedAt = new Date().toISOString();
+      PromptStore.persist();
+      return true;
+    },
+
+    /**
+     * Last-write-wins merge of two prompt arrays, keyed by id.
+     * @returns {{merged: Object[], added: number, updated: number}}
+     */
+    mergeLists(localList, remoteList) {
+      const byId = new Map();
+      localList.forEach((p) => p && p.id && byId.set(p.id, p));
+      let added = 0;
+      let updated = 0;
+      (remoteList || []).forEach((remote) => {
+        if (!remote || !remote.id) return;
+        const local = byId.get(remote.id);
+        if (!local) {
+          byId.set(remote.id, remote);
+          if (!remote.deleted) added++;
+          return;
+        }
+        const remoteTime = Date.parse(remote.updatedAt || 0) || 0;
+        const localTime = Date.parse(local.updatedAt || 0) || 0;
+        if (remoteTime > localTime) {
+          byId.set(remote.id, remote);
+          updated++;
+        }
+      });
+      return { merged: [...byId.values()], added, updated };
+    },
+
+    /* ---------------- GitHub Gist sync ---------------- */
+    gist: {
+      config() {
+        return {
+          token: String(Store.get(Config.GM_KEYS.GIST_TOKEN, "") || "").trim(),
+          id: String(Store.get(Config.GM_KEYS.GIST_ID, "") || "").trim(),
+        };
+      },
+
+      setConfig(token, id) {
+        Store.set(Config.GM_KEYS.GIST_TOKEN, String(token || "").trim());
+        Store.set(Config.GM_KEYS.GIST_ID, String(id || "").trim());
+      },
+
+      lastSync() {
+        return Store.get(Config.GM_KEYS.GIST_LAST_SYNC, "") || "";
+      },
+
+      headers(token) {
+        return {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "Content-Type": "application/json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        };
+      },
+
+      /** The gist's single file, as { version, prompts }. */
+      filePayload(prompts) {
+        return {
+          files: {
+            [Config.GIST.FILENAME]: {
+              content: JSON.stringify(
+                {
+                  version: Config.GIST.SCHEMA_VERSION,
+                  updatedAt: new Date().toISOString(),
+                  prompts,
+                },
+                null,
+                2,
+              ),
+            },
+          },
+        };
+      },
+
+      /** Creates a new secret gist and remembers its id. */
+      async create() {
+        const { token } = PromptStore.gist.config();
+        if (!token) throw new Error("Add a GitHub token with 'gist' scope first.");
+        const res = await Net.json({
+          method: "POST",
+          url: `${Config.GIST.API}/gists`,
+          headers: PromptStore.gist.headers(token),
+          body: JSON.stringify({
+            description: Config.GIST.DESCRIPTION,
+            public: false,
+            ...PromptStore.gist.filePayload(PromptStore.load()),
+          }),
+        });
+        Store.set(Config.GM_KEYS.GIST_ID, res.id);
+        Store.set(Config.GM_KEYS.GIST_LAST_SYNC, new Date().toISOString());
+        return res.id;
+      },
+
+      /** Fetches the remote prompt array. Missing file => empty library. */
+      async fetchRemote() {
+        const { token, id } = PromptStore.gist.config();
+        if (!token || !id)
+          throw new Error("Set a GitHub token and gist id first.");
+        const res = await Net.json({
+          method: "GET",
+          // Bust GitHub's edge cache so a push from another machine is visible.
+          url: `${Config.GIST.API}/gists/${id}?t=${Date.now()}`,
+          headers: PromptStore.gist.headers(token),
+        });
+        const file = res.files && res.files[Config.GIST.FILENAME];
+        if (!file) return [];
+        if (file.truncated && file.raw_url) {
+          const raw = await Net.request({ method: "GET", url: file.raw_url });
+          return PromptStore.gist.parseFile(raw.text);
+        }
+        return PromptStore.gist.parseFile(file.content);
+      },
+
+      parseFile(text) {
+        if (!text) return [];
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          throw new Error("The gist file is not valid JSON.");
+        }
+        if (Array.isArray(data)) return data;
+        return Array.isArray(data.prompts) ? data.prompts : [];
+      },
+
+      async pushRemote(prompts) {
+        const { token, id } = PromptStore.gist.config();
+        await Net.json({
+          method: "PATCH",
+          url: `${Config.GIST.API}/gists/${id}`,
+          headers: PromptStore.gist.headers(token),
+          body: JSON.stringify(PromptStore.gist.filePayload(prompts)),
+        });
+      },
+
+      /**
+       * Pull, merge, push back. Safe to run from several machines because the
+       * merge is per-prompt rather than whole-file.
+       * @returns {Promise<{added:number, updated:number, total:number}>}
+       */
+      async sync() {
+        const remote = await PromptStore.gist.fetchRemote();
+        const { merged, added, updated } = PromptStore.mergeLists(
+          PromptStore.load(),
+          remote,
+        );
+        PromptStore._prompts = merged;
+        PromptStore.persist();
+        await PromptStore.gist.pushRemote(merged);
+        Store.set(Config.GM_KEYS.GIST_LAST_SYNC, new Date().toISOString());
+        return {
+          added,
+          updated,
+          total: merged.filter((p) => !p.deleted).length,
+        };
+      },
+    },
+  };
+
+  /* ==========================================================================
+   * 9. COMPOSER — locating the host site's input box and typing into it.
+   *
+   * Every site uses a different editor (plain <textarea>, ProseMirror, Quill),
+   * and all of them are React/Angular-controlled, so assigning .value or
+   * .textContent directly is silently discarded on the next re-render. The two
+   * insertion paths below both go through the events those frameworks listen
+   * for, which is why they survive.
+   * ========================================================================== */
+  const Composer = {
+    // Tried after the active platform's own selectors, so an unrecognised
+    // layout (or a site redesign) still usually works.
+    FALLBACK_SELECTORS: [
+      "form div[contenteditable='true']",
+      "div[contenteditable='true']",
+      "form textarea",
+      "main textarea",
+      "textarea",
+    ],
+
+    isUsable(el) {
+      if (!el || !el.isConnected || el.disabled || el.readOnly) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 40 || rect.height < 12) return false;
+      const style = window.getComputedStyle(el);
+      return (
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        style.opacity !== "0"
+      );
+    },
+
+    /** @returns {HTMLElement|null} the visible composer, or null. */
+    find() {
+      const selectors = [
+        ...(UI._platform && UI._platform.composerSelectors
+          ? UI._platform.composerSelectors
+          : []),
+        ...Composer.FALLBACK_SELECTORS,
+      ];
+      for (const selector of selectors) {
+        let matches;
+        try {
+          matches = [...document.querySelectorAll(selector)];
+        } catch (e) {
+          continue; // A selector that this browser cannot parse — skip it.
+        }
+        // Walk backwards: the composer is virtually always the last match,
+        // since earlier ones tend to be the rendered messages above it.
+        for (let i = matches.length - 1; i >= 0; i--) {
+          if (Composer.isUsable(matches[i])) return matches[i];
+        }
+      }
+      return null;
+    },
+
+    /** Puts the caret at the end of a contenteditable so insertText lands there. */
+    caretToEnd(el) {
+      const selection = window.getSelection();
+      if (!selection) return;
+      if (selection.rangeCount && el.contains(selection.anchorNode)) return;
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    },
+
+    insertIntoTextarea(el, text) {
+      const proto =
+        el.tagName === "TEXTAREA"
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+      // React installs its own value setter on the element instance; going
+      // through the prototype setter is what makes React see the change.
+      const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+      const start = el.selectionStart == null ? el.value.length : el.selectionStart;
+      const end = el.selectionEnd == null ? el.value.length : el.selectionEnd;
+      setter.call(el, el.value.slice(0, start) + text + el.value.slice(end));
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      const caret = start + text.length;
+      try {
+        el.setSelectionRange(caret, caret);
+      } catch (e) {
+        /* some inputs disallow selection APIs */
+      }
+    },
+
+    insertIntoEditable(el, text) {
+      Composer.caretToEnd(el);
+      let inserted = false;
+      try {
+        inserted = document.execCommand("insertText", false, text);
+      } catch (e) {
+        inserted = false;
+      }
+      if (inserted) return;
+      // execCommand is deprecated and already a no-op in some builds; a
+      // synthetic paste is what ProseMirror and Quill handle next-best.
+      try {
+        const data = new DataTransfer();
+        data.setData("text/plain", text);
+        el.dispatchEvent(
+          new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: data,
+          }),
+        );
+      } catch (e) {
+        el.textContent = (el.textContent || "") + text;
+      }
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          data: text,
+          inputType: "insertText",
+        }),
+      );
+    },
+
+    /**
+     * Inserts text at the caret of the site's composer.
+     * @returns {boolean} false when no composer could be found.
+     */
+    insert(text) {
+      const el = Composer.find();
+      if (!el) return false;
+      el.focus();
+      if (el.tagName === "TEXTAREA" || el.tagName === "INPUT")
+        Composer.insertIntoTextarea(el, text);
+      else Composer.insertIntoEditable(el, text);
+      el.focus();
+      return true;
+    },
+  };
+
+  /* ==========================================================================
+   * 10. CHAT EXPORTER — domain logic: extract -> format -> download.
    * Knows nothing about specific sites; everything site-specific comes from
-   * the active Platform adapter (see Platforms abo) or shared Turndown rules.
+   * the active Platform adapter (see Platforms above) or shared Turndown rules.
    * ========================================================================== */
   const ChatExporter = {
     _currentChatData: null,
@@ -1605,12 +2228,13 @@
   };
 
   /* ==========================================================================
-   * 8. UI — panel shell, drag handling, and feature "sections".
+   * 11. UI — panel shell, drag handling, and feature "sections".
    * ========================================================================== */
   const UI = {
     _lastProcessedChatUrl: null,
     _initialListenersAttached: false,
     autoScrollEnabled: Store.get(Config.GM_KEYS.AUTO_SCROLL_ENABLED, true),
+    quickBarEnabled: Store.get(Config.GM_KEYS.QUICKBAR_ENABLED, true),
     _activeSectionId: Store.get(Config.GM_KEYS.PANEL_ACTIVE_SECTION, ""),
     _globalCollapsed: Store.get(Config.GM_KEYS.PANEL_GLOBAL_COLLAPSED, false),
     _drag: { active: false, offsetX: 0, offsetY: 0 },
@@ -1644,6 +2268,14 @@
       dots.textContent = "::";
       rail.appendChild(dots);
 
+      rail.appendChild(
+        UI.makeRailButton({
+          id: "prompts",
+          label: "PL",
+          tooltip: "Prompt Library — save prompts and insert them (ALT+P)",
+          onClick: () => UI.showSection("prompts"),
+        }),
+      );
       rail.appendChild(
         UI.makeRailButton({
           id: "export-md",
@@ -1693,6 +2325,15 @@
         }),
       );
 
+      const quickBtn = UI.makeRailButton({
+        id: "quickbar",
+        label: UI.quickBarEnabled ? "QB" : "qb",
+        tooltip: "Quick Bar over the chat input box — toggle (ALT+Q)",
+        onClick: () => UI.toggleQuickBar(),
+      });
+      quickBtn.id = "ai-exporter-rail-quickbar";
+      rail.appendChild(quickBtn);
+
       if (UI._platform?.hasAutoScroll) {
         const scrollBtn = UI.makeRailButton({
           id: "auto-scroll",
@@ -1706,7 +2347,7 @@
       }
 
       const spacer = document.createElement("div");
-      spacer.className = "ai-exporter-rapacer";
+      spacer.className = "ai-exporter-rail-spacer";
       rail.appendChild(spacer);
 
       const eyeBtn = UI.makeRailButton({
@@ -1889,6 +2530,15 @@
       else if (UI._activeSectionId) UI.showSection(UI._activeSectionId);
     },
 
+    toggleQuickBar() {
+      UI.quickBarEnabled = !UI.quickBarEnabled;
+      Store.set(Config.GM_KEYS.QUICKBAR_ENABLED, UI.quickBarEnabled);
+      const btn = document.getElementById("ai-exporter-rail-quickbar");
+      const labelEl = btn?.querySelector(".rail-icon-text");
+      if (labelEl) labelEl.textContent = UI.quickBarEnabled ? "QB" : "qb";
+      QuickBar.sync();
+    },
+
     toggleAutoScroll() {
       UI.autoScrollEnabled = !UI.autoScrollEnabled;
       Store.set(Config.GM_KEYS.AUTO_SCROLL_ENABLED, UI.autoScrollEnabled);
@@ -1910,6 +2560,15 @@
       }
       UI._activeSectionId = id;
       Store.set(Config.GM_KEYS.PANEL_ACTIVE_SECTION, id);
+      // The QuickBar can ask for a section while the rail is collapsed to its
+      // eye; open it back up rather than showing content next to nothing.
+      if (UI._globalCollapsed) {
+        UI._globalCollapsed = false;
+        Store.set(Config.GM_KEYS.PANEL_GLOBAL_COLLAPSED, false);
+        document
+          .getElementById(Config.DOM.PANEL_ID)
+          ?.classList.remove("global-collapsed");
+      }
       document
         .querySelectorAll(".ai-exporter-rail-btn")
         .forEach((b) =>
@@ -1944,6 +2603,7 @@
 
     buildAllSections() {
       UI._sections = {};
+      UI.sections.registerPromptsSection();
       UI.sections.registerExportSections();
       UI.sections.registerSettingsSection();
       UI.sections.registerMinifierSection();
@@ -2028,8 +2688,30 @@
             );
         };
 
+        const emptyNote = document.createElement("div");
+        emptyNote.className = "ai-exporter-empty-note";
+        emptyNote.textContent =
+          "Nothing to export yet — send a message first.";
+        emptyNote.style.display = "none";
+        wrap.appendChild(emptyNote);
+
         const renderItems = () => {
-          if (!ChatExporter._currentChatData) return;
+          // The panel is visible on empty/new chats now, so say why the
+          // outline is blank instead of showing an empty box.
+          const hasChat = !!(
+            ChatExporter._currentChatData &&
+            ChatExporter._currentChatData.messages.length
+          );
+          emptyNote.style.display = hasChat ? "none" : "block";
+          downloadBtn.disabled = !hasChat;
+          downloadBtn.style.opacity = hasChat ? "" : "0.45";
+          if (!hasChat) {
+            while (messageListDiv.firstChild)
+              messageListDiv.removeChild(messageListDiv.firstChild);
+            userQuestionCount = 0;
+            updateSelectedCountDisplay();
+            return;
+          }
           while (messageListDiv.firstChild)
             messageListDiv.removeChild(messageListDiv.firstChild);
           outlineItemElements.clear();
@@ -2146,6 +2828,428 @@
         return { wrap, renderItems };
       },
 
+      /**
+       * The messages behind the "checked items" source: every checked user
+       * message plus the AI replies that follow it.
+       */
+      selectedChatMessages(chatData) {
+        if (!chatData) return [];
+        const selectedIds = new Set();
+        document
+          .getElementById(Config.DOM.OUTLINE_LIST_ID)
+          ?.querySelectorAll(".outline-item-checkbox:checked")
+          .forEach((cb) => {
+            if (cb.dataset.messageId) selectedIds.add(cb.dataset.messageId);
+          });
+        return chatData.messages.filter((m, idx) => {
+          if (m.author === "user") return selectedIds.has(m.id);
+          for (let i = idx - 1; i >= 0; i--)
+            if (chatData.messages[i].author === "user")
+              return selectedIds.has(chatData.messages[i].id);
+          return false;
+        });
+      },
+
+      /**
+       * The "where does this tool read from?" control shared by Snapcompact,
+       * the Text Minifier and the JSON->TOON converter.
+       *
+       * @returns {{select, customInput, getMessages, getText, getJson}}
+       */
+      buildSourcePicker(wrap, customPlaceholder) {
+        const label = document.createElement("label");
+        label.className = "ai-exporter-section-label";
+        label.textContent = "Source:";
+        wrap.appendChild(label);
+
+        const select = document.createElement("select");
+        [
+          ["chat-selected", "Current chat — checked items"],
+          ["chat-all", "Current chat — entire conversation"],
+          ["custom", "Custom pasted text"],
+        ].forEach(([value, text]) => {
+          const opt = document.createElement("option");
+          opt.value = value;
+          opt.textContent = text;
+          select.appendChild(opt);
+        });
+        select.value = "custom";
+        wrap.appendChild(select);
+
+        const customInput = document.createElement("textarea");
+        customInput.style.height = "70px";
+        customInput.placeholder = customPlaceholder;
+        wrap.appendChild(customInput);
+
+        select.onchange = () => {
+          customInput.style.display =
+            select.value === "custom" ? "block" : "none";
+        };
+
+        const getMessages = () => {
+          const chatData = ChatExporter._currentChatData;
+          if (!chatData) return [];
+          return select.value === "chat-selected"
+            ? UI.sections.selectedChatMessages(chatData)
+            : chatData.messages;
+        };
+
+        return {
+          select,
+          customInput,
+          getMessages,
+          /**
+           * Plain-text view of the chosen source. Deliberately keeps the
+           * original whitespace — the Text Minifier is the thing that strips
+           * it, so pre-collapsing here would make it a no-op.
+           */
+          getText() {
+            if (select.value === "custom") return customInput.value;
+            return getMessages()
+              .map(
+                (m) =>
+                  `${m.author === "user" ? "U" : "A"}: ${(m.contentText || "").trim()}`,
+              )
+              .join("\n\n");
+          },
+          /**
+           * JSON view of the chosen source: the pasted JSON, or the chat
+           * flattened into a compact { title, platform, messages[] } object.
+           */
+          getJson() {
+            if (select.value === "custom") return JSON.parse(customInput.value);
+            const chatData = ChatExporter._currentChatData;
+            const messages = getMessages();
+            if (!chatData || !messages.length)
+              throw new Error("No chat messages available on this page.");
+            return {
+              title: chatData.title,
+              platform: chatData.platformId,
+              exportedAt: new Date().toISOString(),
+              messages: messages.map((m) => ({
+                role: m.author === "user" ? "user" : "assistant",
+                text: (m.contentText || "").replace(/\s+/g, " ").trim(),
+              })),
+            };
+          },
+        };
+      },
+
+      /**
+       * Prompt library. Rows insert into the site's composer on click; the
+       * "+" form saves a new prompt; the gist panel mirrors everything to a
+       * secret gist so the library follows you between machines.
+       */
+      registerPromptsSection() {
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex";
+        wrap.style.flexDirection = "column";
+        wrap.style.gap = "8px";
+
+        const topRow = document.createElement("div");
+        topRow.className = "ai-exporter-btn-row";
+        const newBtn = document.createElement("button");
+        newBtn.className = "ai-exporter-btn";
+        newBtn.textContent = "+ New prompt";
+        const syncBtn = document.createElement("button");
+        syncBtn.className = "ai-exporter-btn secondary";
+        syncBtn.textContent = "Sync gist";
+        topRow.appendChild(newBtn);
+        topRow.appendChild(syncBtn);
+        wrap.appendChild(topRow);
+
+        /* ---- add / edit form ---- */
+        const form = document.createElement("div");
+        form.className = "ai-exporter-fieldset";
+        form.hidden = true;
+        const titleLabel = document.createElement("label");
+        titleLabel.className = "ai-exporter-section-label";
+        titleLabel.textContent = "Title:";
+        form.appendChild(titleLabel);
+        const titleInput = document.createElement("input");
+        titleInput.type = "text";
+        titleInput.placeholder = "e.g. Code review checklist";
+        form.appendChild(titleInput);
+        const bodyLabel = document.createElement("label");
+        bodyLabel.className = "ai-exporter-section-label";
+        bodyLabel.textContent = "Prompt:";
+        form.appendChild(bodyLabel);
+        const bodyInput = document.createElement("textarea");
+        bodyInput.style.height = "110px";
+        bodyInput.placeholder = "Paste your prompt here…";
+        form.appendChild(bodyInput);
+        const formRow = document.createElement("div");
+        formRow.className = "ai-exporter-btn-row";
+        const saveBtn = document.createElement("button");
+        saveBtn.className = "ai-exporter-btn";
+        saveBtn.textContent = "Save";
+        const cancelBtn = document.createElement("button");
+        cancelBtn.className = "ai-exporter-btn secondary";
+        cancelBtn.textContent = "Cancel";
+        formRow.appendChild(saveBtn);
+        formRow.appendChild(cancelBtn);
+        form.appendChild(formRow);
+        wrap.appendChild(form);
+
+        const filterInput = document.createElement("input");
+        filterInput.type = "text";
+        filterInput.placeholder = "Filter prompts…";
+        wrap.appendChild(filterInput);
+
+        const list = document.createElement("div");
+        list.className = "ai-exporter-prompt-list";
+        wrap.appendChild(list);
+
+        const status = document.createElement("div");
+        status.className = "ai-exporter-status-line";
+        wrap.appendChild(status);
+
+        /* ---- gist settings ---- */
+        const gistToggle = document.createElement("button");
+        gistToggle.className = "ai-exporter-btn secondary";
+        gistToggle.textContent = "Gist settings";
+        gistToggle.style.marginTop = "2px";
+        wrap.appendChild(gistToggle);
+
+        const gistBox = document.createElement("div");
+        gistBox.className = "ai-exporter-fieldset";
+        gistBox.hidden = true;
+        const tokenLabel = document.createElement("label");
+        tokenLabel.className = "ai-exporter-section-label";
+        tokenLabel.textContent = "GitHub token (scope: gist):";
+        gistBox.appendChild(tokenLabel);
+        const tokenInput = document.createElement("input");
+        tokenInput.type = "password";
+        tokenInput.placeholder = "github_pat_… / ghp_…";
+        gistBox.appendChild(tokenInput);
+        const idLabel = document.createElement("label");
+        idLabel.className = "ai-exporter-section-label";
+        idLabel.textContent = "Gist id:";
+        gistBox.appendChild(idLabel);
+        const idInput = document.createElement("input");
+        idInput.type = "text";
+        idInput.placeholder = "leave empty, then press Create gist";
+        gistBox.appendChild(idInput);
+        const gistRow = document.createElement("div");
+        gistRow.className = "ai-exporter-btn-row";
+        const gistSaveBtn = document.createElement("button");
+        gistSaveBtn.className = "ai-exporter-btn";
+        gistSaveBtn.textContent = "Save";
+        const gistCreateBtn = document.createElement("button");
+        gistCreateBtn.className = "ai-exporter-btn secondary";
+        gistCreateBtn.textContent = "Create gist";
+        gistRow.appendChild(gistSaveBtn);
+        gistRow.appendChild(gistCreateBtn);
+        gistBox.appendChild(gistRow);
+        const gistHelp = document.createElement("div");
+        gistHelp.className = "ai-exporter-status-line";
+        gistHelp.style.whiteSpace = "pre-line";
+        gistHelp.textContent =
+          "The token is stored locally by Tampermonkey and only ever sent to " +
+          "api.github.com.\nA fine-grained token needs read+write on Gists; a " +
+          "classic token needs the 'gist' scope.";
+        gistBox.appendChild(gistHelp);
+        wrap.appendChild(gistBox);
+
+        /* ---- behaviour ---- */
+        let editingId = null;
+
+        const setStatus = (text) => {
+          status.textContent = text;
+        };
+
+        const openForm = (prompt) => {
+          editingId = prompt ? prompt.id : null;
+          titleInput.value = prompt ? prompt.title : "";
+          bodyInput.value = prompt ? prompt.body : "";
+          form.hidden = false;
+          newBtn.textContent = prompt ? "Editing…" : "+ New prompt";
+          titleInput.focus();
+        };
+
+        const closeForm = () => {
+          editingId = null;
+          form.hidden = true;
+          titleInput.value = "";
+          bodyInput.value = "";
+          newBtn.textContent = "+ New prompt";
+        };
+
+        const insertPrompt = (prompt) => {
+          if (Composer.insert(prompt.body)) {
+            setStatus(`Inserted "${Utils.truncate(prompt.title, 40)}".`);
+            return;
+          }
+          navigator.clipboard
+            .writeText(prompt.body)
+            .then(() =>
+              setStatus("No input box found here — copied to clipboard instead."),
+            )
+            .catch(() => setStatus("No input box found on this page."));
+        };
+
+        const renderList = () => {
+          while (list.firstChild) list.removeChild(list.firstChild);
+          const needle = filterInput.value.trim().toLowerCase();
+          const prompts = PromptStore.list().filter(
+            (p) =>
+              !needle ||
+              p.title.toLowerCase().includes(needle) ||
+              p.body.toLowerCase().includes(needle),
+          );
+
+          if (!prompts.length) {
+            const empty = document.createElement("div");
+            empty.className = "ai-exporter-empty-note";
+            empty.textContent = needle
+              ? "No prompt matches that filter."
+              : "No prompts yet — press “+ New prompt” to save one.";
+            list.appendChild(empty);
+            return;
+          }
+
+          prompts.forEach((prompt) => {
+            const row = document.createElement("div");
+            row.className = "ai-exporter-prompt-row";
+
+            const main = document.createElement("button");
+            main.className = "ai-exporter-prompt-main";
+            main.title = "Insert into the chat input box";
+            const titleEl = document.createElement("div");
+            titleEl.className = "ai-exporter-prompt-title";
+            titleEl.textContent = prompt.title;
+            const previewEl = document.createElement("div");
+            previewEl.className = "ai-exporter-prompt-preview";
+            previewEl.textContent = Utils.truncate(
+              prompt.body.replace(/\s+/g, " ").trim(),
+              60,
+            );
+            main.appendChild(titleEl);
+            main.appendChild(previewEl);
+            main.onclick = () => insertPrompt(prompt);
+            row.appendChild(main);
+
+            const actions = document.createElement("div");
+            actions.className = "ai-exporter-prompt-actions";
+            [
+              ["⧉", "Copy prompt", () =>
+                navigator.clipboard
+                  .writeText(prompt.body)
+                  .then(() => setStatus("Copied to clipboard."))],
+              ["✎", "Edit prompt", () => openForm(prompt)],
+              ["✕", "Delete prompt", () => {
+                if (!confirm(`Delete "${prompt.title}"?`)) return;
+                PromptStore.remove(prompt.id);
+                setStatus("Deleted. Press “Sync gist” to mirror the change.");
+              }],
+            ].forEach(([glyph, tip, handler]) => {
+              const btn = document.createElement("button");
+              btn.className = "ai-exporter-mini-btn";
+              btn.textContent = glyph;
+              btn.title = tip;
+              btn.onclick = (e) => {
+                e.stopPropagation();
+                handler();
+              };
+              actions.appendChild(btn);
+            });
+            row.appendChild(actions);
+            list.appendChild(row);
+          });
+        };
+
+        newBtn.onclick = () => (form.hidden ? openForm(null) : closeForm());
+        cancelBtn.onclick = closeForm;
+        filterInput.oninput = renderList;
+
+        saveBtn.onclick = () => {
+          const title = titleInput.value.trim();
+          const body = bodyInput.value;
+          if (!title) return alert("Give the prompt a title.");
+          if (!body.trim()) return alert("The prompt body is empty.");
+          if (editingId) PromptStore.update(editingId, { title, body });
+          else PromptStore.add(title, body);
+          setStatus(editingId ? "Prompt updated." : "Prompt saved.");
+          closeForm();
+        };
+
+        gistToggle.onclick = () => {
+          gistBox.hidden = !gistBox.hidden;
+          if (!gistBox.hidden) {
+            const cfg = PromptStore.gist.config();
+            tokenInput.value = cfg.token;
+            idInput.value = cfg.id;
+          }
+        };
+
+        gistSaveBtn.onclick = () => {
+          PromptStore.gist.setConfig(tokenInput.value, idInput.value);
+          setStatus("Gist settings saved.");
+        };
+
+        gistCreateBtn.onclick = async () => {
+          PromptStore.gist.setConfig(tokenInput.value, idInput.value);
+          gistCreateBtn.disabled = true;
+          setStatus("Creating secret gist…");
+          try {
+            const id = await PromptStore.gist.create();
+            idInput.value = id;
+            setStatus(`Created gist ${id}.`);
+          } catch (e) {
+            setStatus(`Create failed — ${e.message}`);
+          } finally {
+            gistCreateBtn.disabled = false;
+          }
+        };
+
+        syncBtn.onclick = async () => {
+          const cfg = PromptStore.gist.config();
+          if (!cfg.token || !cfg.id) {
+            gistBox.hidden = false;
+            tokenInput.value = cfg.token;
+            idInput.value = cfg.id;
+            return setStatus("Add a token and gist id below first.");
+          }
+          syncBtn.disabled = true;
+          syncBtn.textContent = "Syncing…";
+          try {
+            const res = await PromptStore.gist.sync();
+            setStatus(
+              `Synced — ${res.total} prompt(s); ${res.added} new, ${res.updated} updated from gist.`,
+            );
+          } catch (e) {
+            setStatus(`Sync failed — ${e.message}`);
+          } finally {
+            syncBtn.disabled = false;
+            syncBtn.textContent = "Sync gist";
+          }
+        };
+
+        // Keep the list (and the QuickBar) in step with every store change.
+        PromptStore.subscribe(() => {
+          renderList();
+          QuickBar.render();
+        });
+
+        // Entry point for the QuickBar's "+". showSection() toggles, so only
+        // call it when the section is not already the open one.
+        UI._openNewPromptForm = () => {
+          if (UI._activeSectionId !== "prompts") UI.showSection("prompts");
+          openForm(null);
+        };
+
+        UI._sections["prompts"] = {
+          title: "Prompt library",
+          body: wrap,
+          onShow: () => {
+            renderList();
+            const last = PromptStore.gist.lastSync();
+            if (last && !status.textContent)
+              setStatus(`Last gist sync: ${new Date(last).toLocaleString()}`);
+          },
+        };
+      },
+
       registerExportSections() {
         const md = UI.sections.buildOutlineBody(
           "↓ Download Markdown",
@@ -2205,15 +3309,10 @@
         wrap.style.display = "flex";
         wrap.style.flexDirection = "column";
         wrap.style.gap = "6px";
-        const label = document.createElement("label");
-        label.className = "ai-exporter-section-label";
-        label.textContent = "Paste text:";
-        wrap.appendChild(label);
-        const textInput = document.createElement("textarea");
-        textInput.style.height = "70px";
-        textInput.placeholder =
-          "Enter text with extra spaces, tabs, line breaks...";
-        wrap.appendChild(textInput);
+        const source = UI.sections.buildSourcePicker(
+          wrap,
+          "Enter text with extra spaces, tabs, line breaks...",
+        );
         const row = document.createElement("div");
         row.className = "ai-exporter-btn-row";
         const minifyBtn = document.createElement("button");
@@ -2230,8 +3329,23 @@
         textOutput.readOnly = true;
         textOutput.placeholder = "Minified result...";
         wrap.appendChild(textOutput);
-        minifyBtn.onclick = () =>
-          (textOutput.value = textInput.value.replace(/\s+/g, " ").trim());
+        const stats = document.createElement("div");
+        stats.className = "ai-exporter-status-line";
+        wrap.appendChild(stats);
+        minifyBtn.onclick = () => {
+          const input = source.getText();
+          if (!input.trim()) {
+            textOutput.value = "";
+            stats.textContent =
+              source.select.value === "custom"
+                ? "Nothing to minify — paste some text."
+                : "No chat messages found for that source.";
+            return;
+          }
+          textOutput.value = input.replace(/\s+/g, " ").trim();
+          const saved = input.length - textOutput.value.length;
+          stats.textContent = `${input.length.toLocaleString()} → ${textOutput.value.length.toLocaleString()} chars (−${saved.toLocaleString()})`;
+        };
         copyTextBtn.onclick = () =>
           navigator.clipboard.writeText(textOutput.value).then(() => {
             copyTextBtn.textContent = "Copied!";
@@ -2245,14 +3359,11 @@
         wrap.style.display = "flex";
         wrap.style.flexDirection = "column";
         wrap.style.gap = "6px";
-        const label = document.createElement("label");
-        label.className = "ai-exporter-section-label";
-        label.textContent = "Paste JSON:";
-        wrap.appendChild(label);
-        const jsonInput = document.createElement("textarea");
-        jsonInput.style.height = "70px";
-        jsonInput.placeholder = '{"key": "value", ...}';
-        wrap.appendChild(jsonInput);
+        const source = UI.sections.buildSourcePicker(
+          wrap,
+          '{"key": "value", ...}',
+        );
+        const jsonInput = source.customInput;
         const fileInput = document.createElement("input");
         fileInput.type = "file";
         fileInput.accept = ".json,.jsonc";
@@ -2265,13 +3376,15 @@
         loadJsonBtn.textContent = "Load File";
         loadJsonBtn.onclick = () => fileInput.click();
         row1.appendChild(loadJsonBtn);
-        const convertBtn = document.createElement("buon");
+        const convertBtn = document.createElement("button");
         convertBtn.className = "ai-exporter-btn";
         convertBtn.textContent = "Convert";
         row1.appendChild(convertBtn);
         wrap.appendChild(row1);
         fileInput.onchange = (e) => {
           if (!e.target.files[0]) return;
+          source.select.value = "custom";
+          source.select.onchange();
           const reader = new FileReader();
           reader.onload = (event) => {
             try {
@@ -2299,9 +3412,13 @@
         wrap.appendChild(copyJsonBtn);
         convertBtn.onclick = () => {
           try {
-            jsonOutput.value = Lib.jsonToToon(JSON.parse(jsonInput.value));
+            // For a chat source this is the exported conversation object; for
+            // the custom source it is whatever JSON was pasted or loaded.
+            jsonOutput.value = Lib.jsonToToon(source.getJson());
           } catch (e) {
-            jsonOutput.value = "Error: Invalid JSON\n" + e.message;
+            jsonOutput.value =
+              (source.select.value === "custom" ? "Error: Invalid JSON\n" : "Error: ") +
+              e.message;
           }
         };
         copyJsonBtn.onclick = () =>
@@ -2365,23 +3482,6 @@
         results.style.overflowY = "auto";
         wrap.appendChild(results);
 
-        function getSelectedMessagesForSnapcompact(chatData) {
-          const selectedIds = new Set();
-          document
-            .getElementById(Config.DOM.OUTLINE_LIST_ID)
-            ?.querySelectorAll(".outline-item-checkbox:checked")
-            .forEach((cb) => {
-              if (cb.dataset.messageId) selectedIds.add(cb.dataset.messageId);
-            });
-          return chatData.messages.filter((m, idx) => {
-            if (m.author === "user") return selectedIds.has(m.id);
-            for (let i = idx - 1; i >= 0; i--)
-              if (chatData.messages[i].author === "user")
-                return selectedIds.has(chatData.messages[i].id);
-            return false;
-          });
-        }
-
         const getPages = () => {
           let text = "";
           if (sourceSelect.value === "custom") {
@@ -2401,7 +3501,7 @@
           } else {
             const msgs =
               sourceSelect.value === "chat-selected"
-                ? getSelectedMessagesForSnapcompact(
+                ? UI.sections.selectedChatMessages(
                     ChatExporter._currentChatData,
                   )
                 : ChatExporter._currentChatData.messages;
@@ -2455,7 +3555,7 @@
                       e.message +
                       "\nMake sure you interact with the page first.",
                   );
-                  newChatBtn.texontent = "Copy Image & Open New Chat";
+                  newChatBtn.textContent = "Copy Image & Open New Chat";
                 }
               }, "image/png");
             };
@@ -2535,12 +3635,19 @@
           UI._sections[UI._activeSectionId] &&
           !UI._globalCollapsed
         )
-          UI.showSection(UI._actiSectionId);
+          UI.showSection(UI._activeSectionId);
       }
       if (!UI._platform) {
         panel.style.display = "none";
         return;
       }
+      // The panel stays up even with an empty conversation: on a brand-new
+      // chat there are no messages to extract yet, and hiding the panel there
+      // is exactly when the Prompt Library and Quick Bar are most useful.
+      // Only the chat-dependent sections care whether messages exist.
+      panel.style.display = "flex";
+      QuickBar.sync();
+
       const freshChatData = ChatExporter.extractChatData(
         UI._platform,
         document,
@@ -2557,17 +3664,10 @@
             .contentText !==
             prev.messages[prev.messages.length - 1].contentText);
 
-      if (!hasDataChanged) {
-        panel.style.display =
-          freshChatData && freshChatData.messages.length > 0 ? "flex" : "none";
-        return;
-      }
+      if (!hasDataChanged) return;
       ChatExporter._currentChatData = freshChatData;
-      if (!freshChatData || freshChatData.messages.length === 0) {
-        panel.style.display = "none";
-        return;
-      }
-      panel.style.display = "flex";
+      // Re-render even when the chat went empty (a new chat was opened), so a
+      // stale outline from the previous conversation is cleared out.
       if (typeof UI._renderOutlineItemsMd === "function")
         UI._renderOutlineItemsMd();
       if (typeof UI._renderOutlineItemsJson === "function")
@@ -2650,10 +3750,7 @@
         return;
       }
       UI._lastProcessedChatUrl = currentUrl;
-      if (!UI._initialListenersAttached) {
-        UI.initUrlChangeObserver();
-        UI._initialListenersAttached = true;
-      }
+      // (The URL-change observer is installed for every platform in init().)
 
       while (true) {
         scrollableElement.scrollTop = 0;
@@ -2701,6 +3798,13 @@
       ) {
         setTimeout(() => UI.autoScrollToTop(), 100);
       }
+      // Opening a new chat swaps out the whole composer and empties the
+      // message list without necessarily firing a mutation the observer sees,
+      // so re-attach after the SPA has settled.
+      setTimeout(() => {
+        UI.ensurePanel();
+        UI.refresh();
+      }, 400);
     },
 
     initObserver() {
@@ -2790,6 +3894,14 @@
           e.preventDefault();
           ChatExporter.initiateExport("json", UI._platform);
         }
+        if (e.altKey && e.code === "KeyP") {
+          e.preventDefault();
+          UI.showSection("prompts");
+        }
+        if (e.altKey && e.code === "KeyQ") {
+          e.preventDefault();
+          UI.toggleQuickBar();
+        }
         if (UI._platform?.hasAutoScroll && e.altKey && e.code === "KeyA") {
           e.preventDefault();
           UI.toggleAutoScroll();
@@ -2802,10 +3914,15 @@
       if (!UI._platform) return; // Unsupported site — do nothing.
 
       UI.setupShortcuts();
+      if (!UI._initialListenersAttached) {
+        UI.initUrlChangeObserver();
+        UI._initialListenersAttached = true;
+      }
       const start = () => {
         setTimeout(() => {
           UI.ensurePanel();
           UI.buildAllSections();
+          QuickBar.start();
           UI.refresh();
           if (UI._platform.hasAutoScroll)
             setTimeout(
@@ -2825,7 +3942,215 @@
   };
 
   /* ==========================================================================
-   * 9. BOOTSTRAP
+   * 11b. QUICK BAR — a thin strip of prompt chips docked just above the site's
+   * composer, so a saved prompt is one click away from where you are already
+   * typing.
+   *
+   * It is a position: fixed element rather than a child of the composer: every
+   * one of these sites re-renders its composer subtree constantly, and an
+   * injected child gets wiped (or breaks the editor's own DOM assumptions).
+   * Staying outside and re-measuring costs one getBoundingClientRect per tick.
+   * ========================================================================== */
+  const QuickBar = {
+    _el: null,
+    _scroll: null,
+    _target: null,
+    _lastRect: "",
+    _timer: null,
+    _resizeObserver: null,
+    _started: false,
+
+    ensureEl() {
+      if (QuickBar._el && QuickBar._el.isConnected) return QuickBar._el;
+      Theme.injectStyles();
+      const bar = document.createElement("div");
+      bar.id = Config.DOM.QUICKBAR_ID;
+
+      const scroll = document.createElement("div");
+      scroll.className = "qb-scroll";
+      bar.appendChild(scroll);
+
+      const addBtn = document.createElement("button");
+      addBtn.className = "qb-icon";
+      addBtn.textContent = "+";
+      addBtn.title = "Save a new prompt";
+      addBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof UI._openNewPromptForm === "function") UI._openNewPromptForm();
+      };
+      bar.appendChild(addBtn);
+
+      const libBtn = document.createElement("button");
+      libBtn.className = "qb-icon";
+      libBtn.textContent = "☰";
+      libBtn.title = "Open the prompt library";
+      libBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        UI.showSection("prompts");
+      };
+      bar.appendChild(libBtn);
+
+      const hideBtn = document.createElement("button");
+      hideBtn.className = "qb-icon";
+      hideBtn.textContent = "✕";
+      hideBtn.title = "Hide the quick bar (ALT+Q to bring it back)";
+      hideBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        UI.toggleQuickBar();
+      };
+      bar.appendChild(hideBtn);
+
+      // Clicking the bar must never steal focus from the composer, otherwise
+      // the caret position we are about to insert at is lost.
+      bar.addEventListener("mousedown", (e) => e.preventDefault());
+
+      document.body.appendChild(bar);
+      QuickBar._el = bar;
+      QuickBar._scroll = scroll;
+      QuickBar.render();
+      return bar;
+    },
+
+    /** Rebuilds the chip row from the current prompt library. */
+    render() {
+      if (!QuickBar._scroll) return;
+      const scroll = QuickBar._scroll;
+      while (scroll.firstChild) scroll.removeChild(scroll.firstChild);
+
+      const prompts = PromptStore.list().slice(0, Config.QUICKBAR_MAX_CHIPS);
+      if (!prompts.length) {
+        const note = document.createElement("span");
+        note.className = "qb-empty";
+        note.textContent = "No saved prompts — press + to add one";
+        scroll.appendChild(note);
+        return;
+      }
+
+      prompts.forEach((prompt) => {
+        const chip = document.createElement("button");
+        chip.className = "qb-chip";
+        chip.textContent = prompt.title;
+        chip.title = Utils.truncate(prompt.body.replace(/\s+/g, " ").trim(), 220);
+        chip.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!Composer.insert(prompt.body)) {
+            navigator.clipboard.writeText(prompt.body).catch(() => {});
+            chip.textContent = "Copied — no input box";
+            setTimeout(() => (chip.textContent = prompt.title), 1500);
+          }
+        };
+        scroll.appendChild(chip);
+      });
+    },
+
+    hide() {
+      if (QuickBar._el) QuickBar._el.classList.remove("visible");
+    },
+
+    /**
+     * Re-measures the composer and glues the bar to its top edge. Cheap enough
+     * to call on every tick: it bails out unless the rect actually moved.
+     */
+    position() {
+      const bar = QuickBar._el;
+      const target = QuickBar._target;
+      if (!bar || !target) return;
+      const rect = target.getBoundingClientRect();
+      const key = `${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)},${Math.round(rect.height)},${Math.round(bar.offsetHeight)}`;
+      if (key === QuickBar._lastRect) return;
+      QuickBar._lastRect = key;
+
+      const barHeight = bar.offsetHeight || 32;
+      const gap = 6;
+      const width = Math.min(rect.width, window.innerWidth - 16);
+      // Prefer sitting above the composer; if there is no room up there (short
+      // viewport, composer pinned to the top), sit just below it instead.
+      let top = rect.top - barHeight - gap;
+      if (top < 4) top = Math.min(rect.bottom + gap, window.innerHeight - barHeight - 4);
+      let left = rect.left;
+      if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
+      if (left < 8) left = 8;
+
+      bar.style.width = `${width}px`;
+      bar.style.left = `${left}px`;
+      bar.style.top = `${Math.max(4, top)}px`;
+      bar.classList.toggle("compact", width < 320);
+    },
+
+    /** Finds/re-finds the composer and shows or hides the bar accordingly. */
+    sync() {
+      if (!UI._platform) return;
+      if (!UI.quickBarEnabled) {
+        QuickBar.hide();
+        QuickBar._target = null;
+        return;
+      }
+      const bar = QuickBar.ensureEl();
+      const target = Composer.find();
+      if (!target) {
+        QuickBar._target = null;
+        QuickBar.hide();
+        return;
+      }
+      if (target !== QuickBar._target) {
+        QuickBar._target = target;
+        QuickBar._lastRect = "";
+        if (QuickBar._resizeObserver) {
+          QuickBar._resizeObserver.disconnect();
+          QuickBar._resizeObserver.observe(target);
+        }
+      }
+      bar.classList.add("visible");
+      QuickBar.position();
+    },
+
+    /** Installs the listeners that keep the bar glued to a moving composer. */
+    start() {
+      if (QuickBar._started) return;
+      QuickBar._started = true;
+
+      if (typeof ResizeObserver === "function") {
+        QuickBar._resizeObserver = new ResizeObserver(() => {
+          QuickBar._lastRect = "";
+          QuickBar.position();
+        });
+      }
+
+      // Capture-phase scroll fires for every scrollable ancestor, so coalesce
+      // the measurements into one per frame.
+      let frame = 0;
+      const reposition = () => {
+        if (frame) return;
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          QuickBar._lastRect = "";
+          QuickBar.position();
+        });
+      };
+      window.addEventListener("resize", reposition);
+      window.addEventListener("scroll", reposition, true);
+
+      // The composer grows as you type and is swapped out wholesale on
+      // navigation, so a slow poll backs up the observers.
+      QuickBar._timer = setInterval(() => {
+        if (!QuickBar._target || !QuickBar._target.isConnected)
+          QuickBar.sync();
+        else QuickBar.position();
+      }, Config.QUICKBAR_POLL_MS);
+
+      // refresh() may already have found a composer before the observer
+      // existed; clearing the target makes the next sync re-attach it.
+      QuickBar._target = null;
+      QuickBar.sync();
+    },
+  };
+
+  /* ==========================================================================
+   * 12. BOOTSTRAP
    * ========================================================================== */
   GM_registerMenuCommand("Set Gemini Chat Title Prefix", () => {
     const currentPrefix = Store.get(
