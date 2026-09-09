@@ -3,121 +3,217 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>AiUtil — bookmarklet builder</title>
+<title>Bookmarklet builder — DailyScripts</title>
 <style>
-  :root { color-scheme: light dark; --fg:#111; --bg:#fff; --muted:#666; --line:#000; --accent:#000; --accentfg:#fff; }
+  :root { color-scheme: light dark; --fg:#111; --bg:#fff; --card:#fff; --muted:#666;
+          --line:#000; --soft:#d5d5d5; --accent:#000; --accentfg:#fff;
+          --ok:#0a7d28; --warn:#8a6100; --bad:#a11; }
   @media (prefers-color-scheme: dark) {
-    :root { --fg:#eee; --bg:#141414; --muted:#9a9a9a; --line:#666; --accent:#eee; --accentfg:#111; }
+    :root { --fg:#eee; --bg:#141414; --card:#1c1c1c; --muted:#9a9a9a; --line:#777;
+            --soft:#3a3a3a; --accent:#eee; --accentfg:#111;
+            --ok:#5fd07d; --warn:#e0b44a; --bad:#f2837f; }
   }
   * { box-sizing: border-box; }
-  body { margin:0; padding:24px 16px 64px; background:var(--bg); color:var(--fg);
+  body { margin:0; padding:24px 16px 72px; background:var(--bg); color:var(--fg);
          font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
-  main { max-width: 760px; margin: 0 auto; }
+  main { max-width: 780px; margin: 0 auto; }
   h1 { font-size: 22px; margin: 0 0 4px; }
-  h2 { font-size: 15px; margin: 28px 0 8px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
   p { margin: 0 0 12px; }
   .muted { color: var(--muted); font-size: 13px; }
-  .step { border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .step { border:1px solid var(--soft); background:var(--card); border-radius:12px;
+          padding:16px; margin-bottom:14px; }
   .step > :last-child { margin-bottom: 0; }
+  .step h2 { display:flex; align-items:center; gap:8px; }
+  .num { display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto;
+         width:22px; height:22px; border-radius:50%; background:var(--accent);
+         color:var(--accentfg); font-size:12px; }
   button { font:inherit; font-weight:700; cursor:pointer; border-radius:8px; padding:9px 14px;
            border:1px solid var(--line); background:var(--accent); color:var(--accentfg); }
-  button.sec { background:transparent; color:var(--fg); font-weight:600; }
-  button:disabled { opacity:.45; cursor:default; }
+  button.sec { background:transparent; color:var(--fg); font-weight:600; border-color:var(--soft); }
+  button:disabled { opacity:.4; cursor:default; }
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  textarea { width:100%; min-height:110px; font-family:ui-monospace,monospace; font-size:12px;
-             background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px; }
-  #out { min-height:150px; }
-  #status { font-size:13px; margin-top:10px; white-space:pre-line; }
+  select, input[type=text] { font:inherit; padding:8px 10px; border-radius:8px;
+           border:1px solid var(--soft); background:var(--bg); color:var(--fg); min-width:0; }
+  select { flex:1 1 220px; }
+  textarea { width:100%; min-height:100px; font-family:ui-monospace,monospace; font-size:12px;
+             background:var(--bg); color:var(--fg); border:1px solid var(--soft);
+             border-radius:8px; padding:8px; }
+  #out { min-height:130px; }
+  .note { font-size:13px; margin-top:10px; white-space:pre-line; }
   #drag { display:none; margin-top:12px; padding:10px 16px; border:2px dashed var(--line);
           border-radius:10px; text-decoration:none; color:var(--fg); font-weight:700; }
-  label.opt { display:flex; gap:7px; align-items:center; font-size:13px; margin-bottom:6px; }
+  label.opt { display:flex; gap:7px; align-items:center; font-size:13px; margin-bottom:8px; }
   code { background:rgba(128,128,128,.18); padding:1px 5px; border-radius:4px; font-size:13px; }
-  ol { padding-left: 20px; }
+  details { margin-top:12px; }
+  summary { cursor:pointer; font-size:13px; color:var(--muted); }
+  details[open] summary { margin-bottom:10px; }
+  ol, ul { padding-left: 20px; margin: 0 0 12px; }
   li { margin-bottom: 6px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  td { padding:4px 6px 4px 0; vertical-align:top; }
+  td.k { font-family:ui-monospace,monospace; white-space:nowrap; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  .badge { font-size:11px; font-weight:700; padding:1px 6px; border-radius:10px;
+           border:1px solid currentColor; }
 </style>
 </head>
 <body>
 <main>
-  <h1>AiUtil — bookmarklet builder</h1>
-  <p class="muted">Turns <code>AiUtil.js</code> into a single <code>javascript:</code> bookmark, so you can
-  run it on a phone or anywhere Tampermonkey is not installed. Everything happens in this page; nothing is uploaded.</p>
+  <h1>Bookmarklet builder</h1>
+  <p class="muted">Packs any userscript in this repo into a single <code>javascript:</code> bookmark,
+  so it runs on a phone or anywhere Tampermonkey is not installed. Everything happens in this page —
+  nothing is uploaded.</p>
 
   <div class="step">
-    <h2 style="margin-top:0">1 · Load AiUtil.js</h2>
+    <h2><span class="num">1</span> Pick a script</h2>
     <div class="row">
-      <button id="btn-fetch">Load from this folder</button>
-      <button class="sec" id="btn-pick">Choose file…</button>
-      <input type="file" id="file" accept=".js" hidden />
+      <select id="script"><option value="">Looking for scripts…</option></select>
+      <button id="btn-load" disabled>Load</button>
     </div>
-    <p class="muted" style="margin:10px 0 6px">Opening this page straight off your disk blocks the fetch —
-    use <b>Choose file…</b>, or paste the script below.</p>
-    <textarea id="src" placeholder="…or paste the whole contents of AiUtil.js here"></textarea>
+    <div id="src-note" class="note muted">&nbsp;</div>
+    <details id="adv">
+      <summary>Not listed? Load it another way</summary>
+      <div class="row" style="margin-bottom:10px">
+        <input type="text" id="custom" placeholder="another-script.js, or a full https:// URL" style="flex:1 1 240px" />
+        <button class="sec" id="btn-custom">Fetch</button>
+        <button class="sec" id="btn-pick">Choose file…</button>
+        <input type="file" id="file" accept=".js" hidden />
+      </div>
+      <textarea id="paste" placeholder="…or paste the whole script here"></textarea>
+    </details>
   </div>
 
   <div class="step">
-    <h2 style="margin-top:0">2 · Build</h2>
-    <label class="opt"><input type="checkbox" id="opt-min" checked /> Minify first (roughly halves it — recommended)</label>
+    <h2><span class="num">2</span> Check what survives</h2>
+    <div id="report" class="muted">Load a script first.</div>
+  </div>
+
+  <div class="step">
+    <h2><span class="num">3</span> Build</h2>
+    <label class="opt"><input type="checkbox" id="opt-min" checked />
+      Minify first — usually halves it, which matters for bookmark size limits</label>
     <div class="row"><button id="btn-build" disabled>Build bookmarklet</button></div>
-    <div id="status" class="muted">Load the script first.</div>
+    <div id="status" class="note muted">&nbsp;</div>
   </div>
 
   <div class="step">
-    <h2 style="margin-top:0">3 · Take it</h2>
+    <h2><span class="num">4</span> Take it</h2>
     <textarea id="out" readonly placeholder="The javascript: URL lands here"></textarea>
     <div class="row" style="margin-top:8px">
       <button id="btn-copy" disabled>Copy</button>
-      <button class="sec" id="btn-dl" disabled>Download as .txt</button>
+      <button class="sec" id="btn-dl" disabled>Download .txt</button>
     </div>
-    <a id="drag" href="#">▸ AiUtil — drag me to your bookmarks bar</a>
+    <a id="drag" href="#">▸ drag me to your bookmarks bar</a>
   </div>
 
-  <h2>Putting it on a phone</h2>
-  <ol>
-    <li>Build it here, press <b>Copy</b>. (Easiest on the phone itself — open this page there.)</li>
-    <li>Bookmark any page, then edit that bookmark: replace its URL with what you copied, and name it <code>AiUtil</code>.</li>
-    <li><b>Chrome / Android:</b> open an AI chat, type <code>AiUtil</code> in the address bar and pick the bookmark from the
-        suggestions. <b>Safari / iOS:</b> save it under Favourites and tap it from the bookmarks menu.</li>
-  </ol>
-
-  <h2>What you give up versus Tampermonkey</h2>
-  <ul class="muted">
-    <li>It runs once per page load — reopen it after a reload.</li>
-    <li>Prompts are stored in that site's <code>localStorage</code> instead of Tampermonkey, so they are
-        <b>per-site</b> and are wiped when you clear site data.</li>
-    <li>Gist sync usually will not work: without <code>GM_xmlhttpRequest</code> the call falls back to
-        <code>fetch()</code>, which these sites' CSP blocks. Sync from the desktop, use prompts here.</li>
-    <li>If your browser refuses to save a bookmark this long, install
-        <a href="https://violentmonkey.github.io/">Violentmonkey</a> on Firefox for Android and use the normal
-        userscript instead — that path has none of these limits.</li>
-  </ul>
+  <p class="muted">Install steps, limits and the full list of what the shims cover are in
+  <a href="bookmarklet.md">bookmarklet.md</a>.</p>
 </main>
 
 <script>
 (function () {
   const $ = (id) => document.getElementById(id);
-  const src = $("src"), out = $("out"), status = $("status");
   const TERSER = "https://cdn.jsdelivr.net/npm/terser@5.31.6/dist/bundle.min.js";
+  const FALLBACK_SCRIPTS = ["AiUtil.js", "youtubenotes.js"];
 
-  const say = (msg) => { status.textContent = msg; };
+  let source = "";     // the loaded script text
+  let sourceName = ""; // what it was called, for the storage namespace
+
   const kb = (n) => (n / 1024).toFixed(0) + " KB";
+  const say = (el, msg, cls) => { el.className = "note " + (cls || "muted"); el.textContent = msg; };
 
-  function syncBuildButton() {
-    $("btn-build").disabled = src.value.trim().length < 100;
-    if (!$("btn-build").disabled && !out.value) say("Ready to build.");
+  /* ---------- where are we, and what is next to us? ---------- */
+  // On <owner>.github.io/<repo>/ the repo is inferable, so the script list can
+  // come from the GitHub API instead of being hard-coded here.
+  function repoInfo() {
+    const m = location.hostname.match(/^([^.]+)\.github\.io$/);
+    if (!m) return null;
+    const seg = location.pathname.split("/").filter(Boolean);
+    return { owner: m[1], repo: seg.length ? seg[0] : m[1] + ".github.io" };
   }
-  src.addEventListener("input", syncBuildButton);
 
-  $("btn-fetch").onclick = async () => {
-    say("Fetching AiUtil.js…");
-    try {
-      const res = await fetch("AiUtil.js");
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      src.value = await res.text();
-      say("Loaded " + kb(src.value.length) + " of source.");
-    } catch (e) {
-      say("Could not fetch it (" + e.message + "). Use “Choose file…” or paste it in.");
+  async function discover() {
+    const sel = $("script");
+    const info = repoInfo();
+    let names = null;
+    if (info) {
+      try {
+        const res = await fetch(
+          `https://api.github.com/repos/${info.owner}/${info.repo}/contents/`,
+          { headers: { Accept: "application/vnd.github+json" } },
+        );
+        if (res.ok) {
+          const files = await res.json();
+          names = files
+            .filter((f) => f.type === "file" && /\.js$/i.test(f.name))
+            .map((f) => f.name)
+            .sort();
+        }
+      } catch (e) { /* offline, rate-limited, or a private repo — fall through */ }
     }
-    syncBuildButton();
+    if (!names || !names.length) names = FALLBACK_SCRIPTS.slice();
+
+    sel.innerHTML = "";
+    names.forEach((n) => {
+      const o = document.createElement("option");
+      o.value = n;
+      o.textContent = n;
+      sel.appendChild(o);
+    });
+    $("btn-load").disabled = false;
+    say($("src-note"),
+      names.length + " script(s) found" + (info ? "" : " (default list — open this page on GitHub Pages to list the repo)"));
+    if (!info) $("adv").open = true;
+  }
+
+  /* ---------- loading ---------- */
+  async function fetchText(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return res.text();
+  }
+
+  function accept(text, name) {
+    source = text;
+    sourceName = name;
+    $("btn-build").disabled = source.trim().length < 40;
+    say($("src-note"), `Loaded ${name} — ${kb(source.length)}.`, "ok");
+    buildReport();
+  }
+
+  $("btn-load").onclick = async () => {
+    const name = $("script").value;
+    if (!name) return;
+    say($("src-note"), "Loading " + name + "…");
+    try {
+      accept(await fetchText(name), name);
+    } catch (e) {
+      // Pages may lag behind the default branch; raw is the second-best source.
+      const info = repoInfo();
+      if (info) {
+        try {
+          accept(
+            await fetchText(`https://raw.githubusercontent.com/${info.owner}/${info.repo}/HEAD/${name}`),
+            name,
+          );
+          return;
+        } catch (e2) { /* fall through to the message below */ }
+      }
+      say($("src-note"), `Could not load ${name} (${e.message}). Use “Choose file…” or paste it in.`, "bad");
+      $("adv").open = true;
+    }
+  };
+
+  $("btn-custom").onclick = async () => {
+    const v = $("custom").value.trim();
+    if (!v) return;
+    say($("src-note"), "Fetching " + v + "…");
+    try {
+      accept(await fetchText(v), v.split("/").pop() || "script.js");
+    } catch (e) {
+      say($("src-note"), "Fetch failed (" + e.message + ").", "bad");
+    }
   };
 
   $("btn-pick").onclick = () => $("file").click();
@@ -125,10 +221,137 @@
     const f = e.target.files[0];
     if (!f) return;
     const r = new FileReader();
-    r.onload = () => { src.value = r.result; say("Loaded " + kb(src.value.length) + " of source."); syncBuildButton(); };
+    r.onload = () => accept(r.result, f.name);
     r.readAsText(f);
   };
+  $("paste").addEventListener("input", (e) => {
+    if (e.target.value.trim().length > 40) accept(e.target.value, "pasted-script.js");
+  });
 
+  /* ---------- what the shims can and cannot cover ---------- */
+  // Everything the wrapper defines, and how faithful each stand-in is.
+  const SHIMS = {
+    GM_getValue:      ["ok",   "localStorage, namespaced per script"],
+    GM_setValue:      ["ok",   "localStorage, namespaced per script"],
+    GM_deleteValue:   ["ok",   "localStorage"],
+    GM_listValues:    ["ok",   "localStorage"],
+    GM_addStyle:      ["ok",   "injects a <style> element"],
+    GM_log:           ["ok",   "console.log"],
+    GM_setClipboard:  ["ok",   "navigator.clipboard"],
+    GM_openInTab:     ["ok",   "window.open"],
+    GM_info:          ["ok",   "minimal stub object"],
+    unsafeWindow:     ["ok",   "already the page's window in a bookmarklet"],
+    GM_registerMenuCommand:   ["warn", "no-op — there is no menu to add to"],
+    GM_unregisterMenuCommand: ["warn", "no-op"],
+    GM_notification:  ["warn", "logs to the console instead of notifying"],
+    GM_xmlhttpRequest:["bad",  "falls back to fetch(), so the page's CSP applies"],
+    GM_download:      ["bad",  "not shimmed — the call will throw"],
+    GM_getResourceText:["bad", "not shimmed — @resource is unavailable"],
+    GM_getResourceURL:["bad",  "not shimmed — @resource is unavailable"],
+  };
+
+  function buildReport() {
+    const el = $("report");
+    el.innerHTML = "";
+    const used = new Set();
+    (source.match(/\bGM[_.][A-Za-z_]+/g) || []).forEach((t) => used.add(t.replace(/^GM\./, "GM_")));
+    if (/\bunsafeWindow\b/.test(source)) used.add("unsafeWindow");
+
+    const rows = [];
+    [...used].sort().forEach((name) => {
+      const entry = SHIMS[name] || ["bad", "not shimmed — the call will throw"];
+      rows.push([name, entry[0], entry[1]]);
+    });
+    if (/@require\s/.test(source))
+      rows.push(["@require", "bad", "external @require files are not inlined — paste the combined script instead"]);
+    if (/@run-at\s+document-start/.test(source))
+      rows.push(["@run-at", "warn", "wants document-start; a bookmarklet always runs after load"]);
+    if (/@resource\s/.test(source))
+      rows.push(["@resource", "bad", "bundled resources are unavailable"]);
+
+    if (!rows.length) {
+      el.className = "";
+      el.innerHTML = '<p class="ok" style="margin:0"><b>Fully compatible.</b> ' +
+        'This script uses no Tampermonkey APIs, so the bookmarklet behaves exactly like the userscript.</p>';
+      return;
+    }
+    const table = document.createElement("table");
+    rows.forEach(([k, cls, text]) => {
+      const tr = document.createElement("tr");
+      const td1 = document.createElement("td");
+      td1.className = "k " + cls;
+      td1.textContent = k;
+      const td2 = document.createElement("td");
+      td2.textContent = text;
+      tr.appendChild(td1); tr.appendChild(td2);
+      table.appendChild(tr);
+    });
+    el.className = "";
+    const head = document.createElement("p");
+    head.className = "muted";
+    head.style.margin = "0 0 8px";
+    const bad = rows.filter((r) => r[1] === "bad").length;
+    head.innerHTML = bad
+      ? `<b class="warn">${bad} thing(s) will not work as a bookmarklet.</b> Everything else is covered:`
+      : "<b class='ok'>All covered.</b> Stand-ins the wrapper provides:";
+    el.appendChild(head);
+    el.appendChild(table);
+  }
+
+  /* ---------- the wrapper ---------- */
+  function slug(name) {
+    return name.replace(/\.js$/i, "").replace(/[^A-Za-z0-9]+/g, "_");
+  }
+
+  // The GM_* API does not exist outside a userscript manager, so stand in for
+  // it. Values go to localStorage under a per-script prefix, which keeps two
+  // bookmarklets on the same site from treading on each other.
+  function wrap(code, name) {
+    const id = slug(name);
+    return (
+      "(function(){" +
+      "var G=window;" +
+      "if(G.__bm_" + id + "){alert('" + name + " is already running on this page.');return;}" +
+      "G.__bm_" + id + "=1;" +
+      "var P='bm_" + id + "_';" +
+      "G.GM_getValue=function(k,d){try{var v=localStorage.getItem(P+k);return v===null?d:JSON.parse(v);}catch(e){return d;}};" +
+      "G.GM_setValue=function(k,v){try{localStorage.setItem(P+k,JSON.stringify(v));}catch(e){}};" +
+      "G.GM_deleteValue=function(k){try{localStorage.removeItem(P+k);}catch(e){}};" +
+      "G.GM_listValues=function(){var a=[];try{for(var i=0;i<localStorage.length;i++){" +
+      "var k=localStorage.key(i);if(k.indexOf(P)===0)a.push(k.slice(P.length));}}catch(e){}return a;};" +
+      "G.GM_addStyle=function(c){var s=document.createElement('style');s.textContent=c;" +
+      "(document.head||document.documentElement).appendChild(s);return s;};" +
+      "G.GM_log=function(){console.log.apply(console,arguments);};" +
+      "G.GM_registerMenuCommand=function(){return 0;};" +
+      "G.GM_unregisterMenuCommand=function(){};" +
+      "G.GM_notification=function(o){console.log('[notification]',o);};" +
+      "G.GM_setClipboard=function(t){try{navigator.clipboard.writeText(t);}catch(e){}};" +
+      "G.GM_openInTab=function(u){return window.open(u,'_blank');};" +
+      "G.GM_info={script:{name:'" + name + "',version:'bookmarklet'},scriptHandler:'bookmarklet'};" +
+      // Promise-flavoured GM4 aliases, for scripts written against that API.
+      "G.GM={getValue:function(k,d){return Promise.resolve(G.GM_getValue(k,d));}," +
+      "setValue:function(k,v){G.GM_setValue(k,v);return Promise.resolve();}," +
+      "deleteValue:function(k){G.GM_deleteValue(k);return Promise.resolve();}," +
+      "listValues:function(){return Promise.resolve(G.GM_listValues());}," +
+      "addStyle:function(c){return Promise.resolve(G.GM_addStyle(c));}," +
+      "setClipboard:function(t){return Promise.resolve(G.GM_setClipboard(t));}," +
+      "openInTab:function(u){return Promise.resolve(G.GM_openInTab(u));}," +
+      "xmlHttpRequest:function(o){return G.GM_xmlhttpRequest(o);}};" +
+      // Best-effort only: fetch is subject to the host page's CSP, which a real
+      // GM_xmlhttpRequest would have side-stepped.
+      "G.GM_xmlhttpRequest=function(o){try{fetch(o.url,{method:o.method||'GET'," +
+      "headers:o.headers||{},body:o.data||null}).then(function(r){" +
+      "return r.text().then(function(t){o.onload&&o.onload({status:r.status,responseText:t," +
+      "responseHeaders:'',finalUrl:r.url});});}).catch(function(e){" +
+      "o.onerror&&o.onerror({error:e.message+' (bookmarklet uses fetch, so this page\\\\'s CSP applies)'});});}" +
+      "catch(e){o.onerror&&o.onerror({error:e.message});}};" +
+      "if(!('unsafeWindow' in G))G.unsafeWindow=G;" +
+      code +
+      "})();"
+    );
+  }
+
+  /* ---------- build ---------- */
   function loadTerser() {
     if (window.Terser) return Promise.resolve(window.Terser);
     return new Promise((resolve, reject) => {
@@ -140,75 +363,61 @@
     });
   }
 
-  // Tampermonkey's GM_* API does not exist outside a userscript manager, so
-  // stand in for the pieces AiUtil actually uses. GM_xmlhttpRequest is left
-  // undefined on purpose: Net.request tests for it and falls back to fetch().
-  function wrap(code) {
-    return (
-      "(function(){" +
-      "if(window.__aiUtilBookmarklet){alert('AiUtil is already running on this page.');return;}" +
-      "window.__aiUtilBookmarklet=1;" +
-      "var P='aiUtil_bm_';" +
-      "window.GM_getValue=function(k,d){try{var v=localStorage.getItem(P+k);" +
-      "return v===null?d:JSON.parse(v);}catch(e){return d;}};" +
-      "window.GM_setValue=function(k,v){try{localStorage.setItem(P+k,JSON.stringify(v));}catch(e){}};" +
-      "window.GM_registerMenuCommand=function(){};" +
-      code +
-      "})();"
-    );
-  }
-
   $("btn-build").onclick = async () => {
-    const raw = src.value;
-    let code = raw;
+    let code = source;
     $("btn-build").disabled = true;
+    let minNote = "";
 
     if ($("opt-min").checked) {
-      say("Minifying…");
+      say($("status"), "Minifying…");
       try {
         const Terser = await loadTerser();
-        const res = await Terser.minify(raw, { compress: true, mangle: true });
+        const res = await Terser.minify(source, { compress: true, mangle: true });
         if (res.error) throw res.error;
         code = res.code;
       } catch (e) {
-        say("Minifier unavailable (" + e.message + ") — building unminified.");
+        minNote = "\nMinifier unavailable (" + e.message + ") — built unminified.";
       }
     }
 
-    const url = "javascript:" + encodeURIComponent(wrap(code));
-    out.value = url;
+    const url = "javascript:" + encodeURIComponent(wrap(code, sourceName));
+    $("out").value = url;
     $("btn-copy").disabled = $("btn-dl").disabled = false;
     const drag = $("drag");
     drag.href = url;
+    drag.textContent = "▸ " + sourceName.replace(/\.js$/i, "") + " — drag me to your bookmarks bar";
     drag.style.display = "inline-block";
     $("btn-build").disabled = false;
 
     const warn = url.length > 200000
-      ? "\nThat is long. Some browsers cap bookmark URLs — if saving fails, see the Violentmonkey note below."
+      ? "\nThat is long — some browsers cap bookmark URLs. If saving fails, see bookmarklet.md."
       : "";
-    say("Built: " + kb(raw.length) + " source → " + kb(code.length) + " code → " +
-        kb(url.length) + " bookmarklet." + warn);
+    say($("status"),
+      `Built: ${kb(source.length)} source → ${kb(code.length)} code → ${kb(url.length)} bookmarklet.` + minNote + warn,
+      warn ? "warn" : "ok");
   };
 
   $("btn-copy").onclick = async () => {
     try {
-      await navigator.clipboard.writeText(out.value);
+      await navigator.clipboard.writeText($("out").value);
       $("btn-copy").textContent = "Copied";
     } catch (e) {
-      out.select();
+      $("out").select();
       $("btn-copy").textContent = "Select + copy manually";
     }
     setTimeout(() => ($("btn-copy").textContent = "Copy"), 2000);
   };
 
   $("btn-dl").onclick = () => {
-    const blob = new Blob([out.value], { type: "text/plain" });
+    const blob = new Blob([$("out").value], { type: "text/plain" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "aiutil-bookmarklet.txt";
+    a.download = slug(sourceName) + "-bookmarklet.txt";
     a.click();
     URL.revokeObjectURL(a.href);
   };
+
+  discover();
 })();
 </script>
 </body>
