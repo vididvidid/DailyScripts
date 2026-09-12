@@ -13,11 +13,17 @@ is one click away), exports conversations to Markdown or JSON, and squeezes text
 down with a minifier, a JSON→TOON converter and Snapcompact. Can also be packed
 into a bookmarklet for mobile — see [`bookmarklet.html`](bookmarklet.html).
 
-### 2. YouTube Notes (`youtubenotes.js`)
-A tool designed to help limit your YouTube usage or use it more wisely. It allows you to:
-- Write and save markdown notes directly on YouTube videos and Shorts.
-- Automatically mark videos as "watched".
-- Overlay a giant `❌` on watched videos in your feeds to remind you that you've already seen them and don't need to waste time re-watching them (unless you explicitly choose to).
+### 2. YouTube Notes (`youtubenotes.js`) — [full docs: youtubeReadme.md](youtubeReadme.md)
+A tool for using YouTube deliberately instead of falling into it. Write notes on
+videos and Shorts and see them over the thumbnail everywhere; get a giant `❌`
+over anything you have already watched, with the player blocked until you confirm
+you meant it. "Watched" is not just this browser: it syncs your real YouTube
+watch history (so your phone counts, and every signed-in account), and shares one
+watched list across all of your machines through a secret GitHub Gist — set up
+with one drag-anywhere button and a token. Short videos and Shorts also cost you
+one question when you leave them — what was that, and why did you watch it —
+behind a deliberate three-second pause, with the buttons moved every time so it
+never becomes muscle memory.
 
 ## Installation
 

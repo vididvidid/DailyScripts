@@ -11,9 +11,14 @@
  *
  * Notes on the grants below:
  * - GM_xmlhttpRequest + @connect api.github.com are what let AiUtil.js sync the
- *   prompt library to a GitHub Gist. The AI chat sites' CSP blocks a plain
- *   fetch() to api.github.com, so without these the sync silently fails.
- * - Drop both lines if you do not use the prompt library.
+ *   prompt library, and youtubenotes.js sync its watched list, to a GitHub Gist.
+ *   Both sites' CSP blocks a plain fetch() to api.github.com, so without these
+ *   the sync silently fails.
+ * - @connect gist.githubusercontent.com is only needed once a gist file grows
+ *   past 1 MB, when GitHub stops inlining it and hands back a raw URL instead.
+ * - GM_setValue/GM_getValue are where the GitHub token is kept. Without them it
+ *   falls back to localStorage, where any script on the page could read it.
+ * - Drop these lines only if you use neither gist sync.
  */
 
 // ==UserScript==
@@ -31,6 +36,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.github.com
+// @connect      gist.githubusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
