@@ -5,6 +5,11 @@
  *
  * versions: 
  * 
+ * 0.5.3          the gist button was a 45%-opacity grey circle that read
+ *                as a scroll widget, and in bookmarklet mode it is the only
+ *                way into gist sync — until a token is connected it is now
+ *                YouTube-red with a "Connect Gist" label
+ *
  * 0.5.2          runs as a bookmarklet (phone browsers) with gist sync
  *                intact — youtube.com declares no connect-src, so the
  *                fetch() fallback really does reach api.github.com;
@@ -2052,6 +2057,7 @@
       if (GistSync.isSyncing()) state = 'busy';
       else if (GistSync.isConfigured()) state = GistSync.lastError() ? 'bad' : 'on';
       dot.className = 'ytnotes-gist-dot ytnotes-gist-dot-' + state;
+      if (root) root.classList.toggle('ytnotes-gist-setup', state === 'off');
       fab.title = state === 'on' ? 'Watched list synced to Gist'
         : state === 'busy' ? 'Syncing watched list…'
           : state === 'bad' ? 'Gist sync error — click for details'
@@ -2267,6 +2273,7 @@
       const y = Math.min(maxY, Math.max(EDGE, pos.ry * (window.innerHeight - FAB_SIZE)));
       root.style.left = Math.round(x) + 'px';
       root.style.top = Math.round(y) + 'px';
+      root.classList.toggle('ytnotes-gist-onleft', x < window.innerWidth / 2);
     }
 
     // Open the panel towards whichever side has room for it.
@@ -2350,7 +2357,12 @@
         h('span', { className: 'ytnotes-gist-dot' })
       ]);
       panel = h('div', { className: 'ytnotes-gist-panel' });
-      root = h('div', { className: 'ytnotes-gist-root' }, [fab, panel]);
+      // Until a token is connected this button is the ONLY way into gist
+      // sync (a bookmarklet has no Tampermonkey menu), so it has to read as
+      // a call to action, not as a scroll widget in the corner.
+      const hint = h('span', { className: 'ytnotes-gist-hint', textContent: 'Connect Gist' });
+      hint.addEventListener('click', (e) => { e.stopPropagation(); toggle(true); });
+      root = h('div', { className: 'ytnotes-gist-root' }, [hint, fab, panel]);
 
       document.body.appendChild(root);
       applyPos();
@@ -3001,6 +3013,37 @@
         transition: opacity 0.15s ease, transform 0.15s ease;
       }
       .ytnotes-gist-fab:hover { opacity: 1; transform: scale(1.06); }
+
+      /* not connected yet: loud, labelled, impossible to mistake */
+      .ytnotes-gist-setup .ytnotes-gist-fab {
+        opacity: 1;
+        background: #ff0033;
+        border-color: rgba(255, 255, 255, 0.9);
+        box-shadow: 0 4px 16px rgba(255, 0, 51, 0.45);
+        animation: ytnotes-gist-pulse 2.4s ease-in-out infinite;
+      }
+      @keyframes ytnotes-gist-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255, 0, 51, 0.55); }
+        50%      { box-shadow: 0 0 0 9px rgba(255, 0, 51, 0); }
+      }
+      .ytnotes-gist-hint {
+        display: none;
+        position: absolute;
+        top: 50%;
+        right: 46px;
+        transform: translateY(-50%);
+        white-space: nowrap;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: #0f0f0f;
+        color: #fff;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        font: 600 12px/1 "Roboto", Arial, sans-serif;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+        cursor: pointer;
+      }
+      .ytnotes-gist-onleft .ytnotes-gist-hint { right: auto; left: 46px; }
+      .ytnotes-gist-setup .ytnotes-gist-hint { display: block; }
       .ytnotes-gist-dragging .ytnotes-gist-fab { opacity: 1; cursor: grabbing; }
       .ytnotes-gist-glyph { font-size: 17px; line-height: 1; }
       .ytnotes-gist-dot {

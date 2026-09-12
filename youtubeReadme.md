@@ -78,7 +78,10 @@ History sync answers "what did I watch on my phone". This answers "what did I
 watch on my *other laptop*" — including videos watched before the script existed
 on that machine, or under an account this browser is not signed into.
 
-There is a small `⇅` button floating on every YouTube page. **Drag it anywhere**
+There is a `⇅` button floating in the bottom-right of every YouTube page. Until
+you connect a token it is **red, with a "Connect Gist" label** beside it — in
+bookmarklet mode it is the only way in, so it is meant to be hard to miss. Once
+connected it shrinks to a quiet grey circle. **Drag it anywhere**
 — it remembers where you put it, and it follows a video into fullscreen instead
 of being stranded behind the player. Click it, paste a GitHub token with the
 **`gist`** scope, and that is the whole setup. It will:
