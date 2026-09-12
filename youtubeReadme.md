@@ -132,12 +132,18 @@ YTNotes.gist.overwrite()   // make the gist match this device exactly
 YTNotes.gist.disconnect()  // forget the token on this machine
 ```
 
-**Your stub needs `@grant GM_xmlhttpRequest` and `@connect api.github.com`** —
-YouTube's CSP blocks a plain `fetch()` to GitHub, so without them the sync fails
-with a message saying exactly that. `template.js` already has them, along with
-`GM_setValue`/`GM_getValue`, which is where the token is stored (Tampermonkey's
-own storage, not `localStorage` where any script on youtube.com could read it).
-The token is only ever sent to `api.github.com`.
+Under Tampermonkey, keep `@grant GM_xmlhttpRequest` and `@connect
+api.github.com` in your stub (`template.js` has them) — that path sidesteps CORS
+entirely and keeps working if YouTube ever tightens its policy. It is not
+strictly required though: youtube.com declares only `script-src`, `object-src`
+and `report-uri`, with no `connect-src` and no `default-src` to inherit from, and
+api.github.com answers with `access-control-allow-origin: *`, so a plain
+`fetch()` to GitHub from a YouTube page works. That is exactly why the
+bookmarklet below can sync too.
+
+Also keep `GM_setValue`/`GM_getValue`: that is where the token is stored, in
+Tampermonkey's own storage rather than `localStorage` where any script on
+youtube.com could read it. The token is only ever sent to `api.github.com`.
 
 ---
 
@@ -200,6 +206,55 @@ Knobs in `REFLECTION`: `maxDurationSeconds` (600), `includeShorts`,
 are just arrays, so put your own categories in them.
 
 ---
+
+---
+
+## On your phone, without Tampermonkey
+
+Mobile Chrome has no extensions, but it does have bookmarks — and a bookmark
+whose URL starts with `javascript:` runs against whatever page you are looking
+at. [`bookmarklet.html`](bookmarklet.html) packs this whole script into one of
+those.
+
+**Build it** (once, on a desktop):
+
+1. Open `bookmarklet.html`, pick `youtubenotes.js`, let it minify, copy the
+   `javascript:` URL it produces.
+2. Make a new bookmark in desktop Chrome, paste that as the URL, and name it
+   something short and typeable — `yt`.
+3. Let Chrome sync bookmarks to your phone (same Google account, sync on).
+
+**Use it** (each time you open YouTube):
+
+1. Open YouTube on the phone and wait for the page to load.
+2. Tap the address bar and type the bookmark's name — `yt`.
+3. Tap the **bookmark** entry in the dropdown, not a search result.
+
+The script starts on the page you are already on. YouTube is a single-page app,
+so it keeps working as you browse from there — you only tap it again after a
+genuine page reload. On iOS the same trick works in Safari: bookmark, then type
+its name in the address bar and tap the result.
+
+**What works, and what does not:**
+
+| | |
+|---|---|
+| Watched crosses, player block, history sync, reflection prompts, the `⇅` button | yes — these key off links, URLs and YouTube's own API, not page markup |
+| **Gist sync** | **yes.** The builder shims `GM_xmlhttpRequest` onto `fetch`, and as explained above nothing on youtube.com blocks that from reaching GitHub |
+| The note textareas | probably not on `m.youtube.com` — they attach to desktop renderers like `ytd-watch-metadata`. Use Chrome's **"Request desktop site"** and they come back |
+| Running it twice on one page | the builder catches that and tells you, rather than starting a second copy |
+
+Two things worth knowing:
+
+- **`m.youtube.com` and `www.youtube.com` are different origins**, so they keep
+  separate `localStorage`. Watched marks made on the mobile site are invisible to
+  the desktop site on the same phone. Gist sync is what stitches them together —
+  it is the shared source of truth, so connect the same token everywhere and they
+  converge.
+- In bookmarklet mode there is no Tampermonkey storage, so **the token lives in
+  `localStorage` on youtube.com**, where any script on that origin could read it.
+  The panel says so plainly when it is running that way. Give the token nothing
+  but the `gist` scope, and revoke it from GitHub if the phone goes missing.
 
 ## Everything else
 

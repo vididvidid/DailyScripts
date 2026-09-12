@@ -5,6 +5,12 @@
  *
  * versions: 
  * 
+ * 0.5.2          runs as a bookmarklet (phone browsers) with gist sync
+ *                intact — youtube.com declares no connect-src, so the
+ *                fetch() fallback really does reach api.github.com;
+ *                the panel no longer claims Tampermonkey holds the
+ *                token when a shim does
+ *
  * 0.5.1          reflection actually fires — the 15s threshold was
  *                suppressing the very scrolling it exists to interrupt,
  *                and an unreadable duration silently meant "say nothing";
@@ -1526,11 +1532,18 @@
    * creates it if not, so a new device needs nothing but that token.
    * ============================================================ */
 
-  /* One HTTP entry point. youtube.com ships a strict CSP whose
-   * connect-src does not include api.github.com, so a plain fetch() is
-   * blocked before it leaves the page. GM_xmlhttpRequest runs outside
-   * the page context and is not subject to it. fetch() stays as a
-   * fallback purely so the failure message can explain itself. */
+  /* One HTTP entry point.
+   *
+   * GM_xmlhttpRequest is preferred: it runs outside the page, so no CSP
+   * and no CORS preflight can reach it. But the fetch() fallback is a
+   * real path, not a token gesture — youtube.com's CSP declares only
+   * script-src, object-src and report-uri, with no connect-src and no
+   * default-src to inherit from, and api.github.com answers with
+   * `access-control-allow-origin: *`. So a plain fetch() to GitHub from
+   * a YouTube page genuinely works, which is what lets the whole script
+   * run as a bookmarklet (where no GM_* API exists) with gist sync
+   * intact. Keep both: if YouTube ever adds a connect-src, the
+   * GM_xmlhttpRequest path carries on working. */
   const Net = {
     request({ method = 'GET', url, headers = {}, body = null }) {
       return new Promise((resolve, reject) => {
@@ -1543,8 +1556,8 @@
             timeout: GIST_SYNC.timeoutMs,
             onload: (res) => resolve({ status: res.status, text: res.responseText || '' }),
             onerror: () => reject(new Error(
-              'Network error. Check your Tampermonkey stub grants GM_xmlhttpRequest '
-              + 'and @connect api.github.com.')),
+              'Network error reaching GitHub. Under Tampermonkey, check the stub grants '
+              + 'GM_xmlhttpRequest and @connect api.github.com.')),
             ontimeout: () => reject(new Error('GitHub request timed out.'))
           });
           return;
@@ -1552,8 +1565,8 @@
         fetch(url, { method: method, headers: headers, body: body })
           .then((r) => r.text().then((text) => resolve({ status: r.status, text: text })))
           .catch((e) => reject(new Error(
-            e.message + " — YouTube's CSP almost certainly blocked it. Add "
-            + "'@grant GM_xmlhttpRequest' and '@connect api.github.com' to your stub.")));
+            e.message + ' — could not reach api.github.com. Check the token and your '
+            + 'connection; under Tampermonkey, add @grant GM_xmlhttpRequest.')));
       });
     },
 
@@ -2003,6 +2016,18 @@
       return el;
     }
 
+    // Where the token actually ends up. A bookmarklet shims GM_setValue on
+    // top of localStorage, so "stored by Tampermonkey" would be a lie there
+    // — and it is the one sentence that has to be true.
+    function storageLabel() {
+      try {
+        if (typeof GM_info !== 'undefined' && GM_info && GM_info.scriptHandler === 'bookmarklet') {
+          return "in this browser's localStorage (bookmarklet mode)";
+        }
+      } catch (e) { /* no GM_info at all */ }
+      return Secrets.usingGm() ? 'by Tampermonkey' : "in this browser's localStorage";
+    }
+
     function relativeTime(ts) {
       if (!ts) return 'never';
       const secs = Math.round((Date.now() - ts) / 1000);
@@ -2074,9 +2099,7 @@
 
       body.appendChild(h('p', { className: 'ytnotes-gist-fine' }, [
         'The gist is created for you if you do not have one yet, and reused if you do. '
-        + 'The token is stored by Tampermonkey'
-        + (Secrets.usingGm() ? '' : ' — or, without the GM_setValue grant, in localStorage')
-        + ' and only ever sent to api.github.com.'
+        + 'The token is stored ' + storageLabel() + ', and only ever sent to api.github.com.'
       ]));
 
       setTimeout(() => input.focus(), 50);
