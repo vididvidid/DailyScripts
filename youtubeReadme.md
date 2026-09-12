@@ -218,11 +218,18 @@ those.
 
 **Build it** (once, on a desktop):
 
-1. Open `bookmarklet.html`, pick `youtubenotes.js`, let it minify, copy the
-   `javascript:` URL it produces.
+1. Open `bookmarklet.html`, pick `youtubenotes.js`, and **leave "minify"
+   ticked** — unminified this script is a ~207 KB URL, past the point where
+   browsers start refusing to store bookmarks. Copy the `javascript:` URL.
 2. Make a new bookmark in desktop Chrome, paste that as the URL, and name it
    something short and typeable — `yt`.
 3. Let Chrome sync bookmarks to your phone (same Google account, sync on).
+
+If the bookmark does not show up on the phone, sync has likely dropped it for
+length. You can put it there by hand: bookmark any ordinary page on the phone,
+then **edit** that bookmark and paste the `javascript:` URL over its address —
+Android Chrome will not let you *type* a `javascript:` URL into the omnibox, but
+it will happily keep one you paste into an existing bookmark.
 
 **Use it** (each time you open YouTube):
 
@@ -242,7 +249,7 @@ its name in the address bar and tap the result.
 | Watched crosses, player block, history sync, reflection prompts, the `⇅` button | yes — these key off links, URLs and YouTube's own API, not page markup |
 | **Gist sync** | **yes.** The builder shims `GM_xmlhttpRequest` onto `fetch`, and as explained above nothing on youtube.com blocks that from reaching GitHub |
 | The note textareas | probably not on `m.youtube.com` — they attach to desktop renderers like `ytd-watch-metadata`. Use Chrome's **"Request desktop site"** and they come back |
-| Running it twice on one page | the builder catches that and tells you, rather than starting a second copy |
+| Running it twice on one page | you get an alert saying it is already running, not a second copy |
 
 Two things worth knowing:
 

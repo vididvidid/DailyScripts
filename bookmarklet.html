@@ -337,13 +337,20 @@
       "setClipboard:function(t){return Promise.resolve(G.GM_setClipboard(t));}," +
       "openInTab:function(u){return Promise.resolve(G.GM_openInTab(u));}," +
       "xmlHttpRequest:function(o){return G.GM_xmlhttpRequest(o);}};" +
-      // Best-effort only: fetch is subject to the host page's CSP, which a real
-      // GM_xmlhttpRequest would have side-stepped.
+      // Best-effort only: fetch is subject to CORS and to any connect-src the
+      // host page sets, both of which a real GM_xmlhttpRequest side-steps.
+      // (Plenty of sites set neither — youtube.com declares no connect-src, so
+      // gist sync works from a bookmarklet there.)
+      // NB: no apostrophes in these embedded strings. They live inside a
+      // single-quoted string inside a double-quoted string, and hand-escaping
+      // through both layers is how this shim once emitted  page\\'s  -- an
+      // escaped backslash, ending the string early and breaking every
+      // bookmarklet this page produced.
       "G.GM_xmlhttpRequest=function(o){try{fetch(o.url,{method:o.method||'GET'," +
       "headers:o.headers||{},body:o.data||null}).then(function(r){" +
       "return r.text().then(function(t){o.onload&&o.onload({status:r.status,responseText:t," +
       "responseHeaders:'',finalUrl:r.url});});}).catch(function(e){" +
-      "o.onerror&&o.onerror({error:e.message+' (bookmarklet uses fetch, so this page\\\\'s CSP applies)'});});}" +
+      "o.onerror&&o.onerror({error:e.message+' (bookmarklet mode uses fetch, so CORS and any page CSP apply)'});});}" +
       "catch(e){o.onerror&&o.onerror({error:e.message});}};" +
       "if(!('unsafeWindow' in G))G.unsafeWindow=G;" +
       code +
@@ -380,7 +387,22 @@
       }
     }
 
-    const url = "javascript:" + encodeURIComponent(wrap(code, sourceName));
+    const wrapped = wrap(code, sourceName);
+
+    // Parse it before handing it over. A bookmarklet that does not parse fails
+    // with a bare "Unexpected identifier" in the console of whatever page it
+    // was fired at, which points nowhere near this builder.
+    try {
+      new Function(wrapped);
+    } catch (e) {
+      $("btn-build").disabled = false;
+      say($("status"),
+        "Built code does not parse: " + e.message + "\nThis is a bug in the builder, not in "
+        + sourceName + ". Nothing was copied.", "bad");
+      return;
+    }
+
+    const url = "javascript:" + encodeURIComponent(wrapped);
     $("out").value = url;
     $("btn-copy").disabled = $("btn-dl").disabled = false;
     const drag = $("drag");
