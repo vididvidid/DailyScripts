@@ -43,6 +43,10 @@
  *               whole composer card
  *               It drew over the site's own menus ("+" tools on Gemini); it
  *               now hides while an open menu/listbox/dialog overlaps it
+ *               Known open: on Grok it still draws over the "+" and model
+ *               menus (Radix, role="menu"). The overlap check hides the bar
+ *               on that exact markup in headless Chromium, so the live page
+ *               differs somehow — not yet diagnosed
  */
 
 // ==UserScript==
