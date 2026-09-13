@@ -29,6 +29,12 @@
  *               Named the two pieces: Floating Dock and Quick Dock
  *               bookmarklet.html — packs the script into a javascript: URL
  *               for mobile browsers with no userscript manager
+ *
+ *  0.4.0        Gist file renamed to prompts.gist — the old
+ *               aiutil-prompts.json is still read and removed on next sync
+ *               "View on GitHub" button opens the gist in a new tab
+ *               Net also accepts GM.xmlHttpRequest, and a blocked request now
+ *               says whether the stub lacks the grant or it is a bookmarklet
  */
 
 // ==UserScript==
@@ -116,7 +122,11 @@
     // gist holds one JSON file; the token needs only the "gist" scope.
     GIST: {
       API: "https://api.github.com",
-      FILENAME: "aiutil-prompts.json",
+      FILENAME: "prompts.gist",
+      // Earlier name. Still read if the new file is absent, and deleted on the
+      // next push, so gists made before the rename migrate themselves.
+      LEGACY_FILENAME: "aiutil-prompts.json",
+      WEB: "https://gist.github.com",
       DESCRIPTION: "AiUtil prompt library",
       SCHEMA_VERSION: 1,
       TIMEOUT_MS: 20000,
@@ -700,8 +710,15 @@
     /** @returns {Promise<{status:number, text:string}>} */
     request({ method = "GET", url, headers = {}, body = null }) {
       return new Promise((resolve, reject) => {
-        if (typeof GM_xmlhttpRequest === "function") {
-          GM_xmlhttpRequest({
+        // A stub may grant either spelling; GM.xmlHttpRequest is the GM4 form.
+        const gmXhr =
+          typeof GM_xmlhttpRequest === "function"
+            ? GM_xmlhttpRequest
+            : typeof GM !== "undefined" && GM && typeof GM.xmlHttpRequest === "function"
+              ? GM.xmlHttpRequest
+              : null;
+        if (gmXhr) {
+          gmXhr({
             method,
             url,
             headers,
@@ -722,14 +739,21 @@
         }
         fetch(url, { method, headers, body })
           .then((r) => r.text().then((text) => resolve({ status: r.status, text })))
-          .catch((e) =>
-            reject(
-              new Error(
-                `${e.message} — the page's CSP likely blocked it. Add ` +
-                  "'@grant GM_xmlhttpRequest' and '@connect api.github.com' to your stub.",
-              ),
-            ),
-          );
+          .catch((e) => {
+            // Say which environment we are in: grants written inside this
+            // @require'd file are ignored, only the installed stub's count.
+            const handler =
+              typeof GM_info !== "undefined" && GM_info ? GM_info.scriptHandler : "";
+            const hint =
+              handler === "bookmarklet"
+                ? "Bookmarklets cannot bypass it — sync from desktop Tampermonkey instead."
+                : "GM_xmlhttpRequest is not granted to this script. Grants inside " +
+                  "AiUtil.js are ignored when it is loaded via @require — add " +
+                  "'// @grant GM_xmlhttpRequest' and '// @connect api.github.com' " +
+                  "to the installed stub's header in the Tampermonkey editor, save, " +
+                  "and reload the page.";
+            reject(new Error(`${e.message} — the page's CSP blocked it. ${hint}`));
+          });
       });
     },
 
@@ -1645,10 +1669,20 @@
         };
       },
 
+      /** Browser URL of the gist; gist.github.com/<id> redirects to the owner's page. */
+      webUrl(id) {
+        return `${Config.GIST.WEB}/${encodeURIComponent(id)}`;
+      },
+
+      // Set by fetchRemote when the gist still carries the old filename.
+      _hasLegacyFile: false,
+
       /** The gist's single file, as { version, prompts }. */
-      filePayload(prompts) {
+      filePayload(prompts, { dropLegacy = false } = {}) {
         return {
           files: {
+            // null deletes a gist file; only sent when it is known to exist.
+            ...(dropLegacy ? { [Config.GIST.LEGACY_FILENAME]: null } : {}),
             [Config.GIST.FILENAME]: {
               content: JSON.stringify(
                 {
@@ -1694,7 +1728,9 @@
           url: `${Config.GIST.API}/gists/${id}?t=${Date.now()}`,
           headers: PromptStore.gist.headers(token),
         });
-        const file = res.files && res.files[Config.GIST.FILENAME];
+        const files = res.files || {};
+        PromptStore.gist._hasLegacyFile = !!files[Config.GIST.LEGACY_FILENAME];
+        const file = files[Config.GIST.FILENAME] || files[Config.GIST.LEGACY_FILENAME];
         if (!file) return [];
         if (file.truncated && file.raw_url) {
           const raw = await Net.request({ method: "GET", url: file.raw_url });
@@ -1721,8 +1757,13 @@
           method: "PATCH",
           url: `${Config.GIST.API}/gists/${id}`,
           headers: PromptStore.gist.headers(token),
-          body: JSON.stringify(PromptStore.gist.filePayload(prompts)),
+          body: JSON.stringify(
+            PromptStore.gist.filePayload(prompts, {
+              dropLegacy: PromptStore.gist._hasLegacyFile,
+            }),
+          ),
         });
+        PromptStore.gist._hasLegacyFile = false;
       },
 
       /**
@@ -3234,8 +3275,13 @@
         const gistCreateBtn = document.createElement("button");
         gistCreateBtn.className = "ai-exporter-btn secondary";
         gistCreateBtn.textContent = "Create gist";
+        const gistViewBtn = document.createElement("button");
+        gistViewBtn.className = "ai-exporter-btn secondary";
+        gistViewBtn.textContent = "View on GitHub";
+        gistViewBtn.title = "Open the gist on gist.github.com in a new tab";
         gistRow.appendChild(gistSaveBtn);
         gistRow.appendChild(gistCreateBtn);
+        gistRow.appendChild(gistViewBtn);
         gistBox.appendChild(gistRow);
         const gistHelp = document.createElement("div");
         gistHelp.className = "ai-exporter-status-line";
@@ -3381,6 +3427,12 @@
         gistSaveBtn.onclick = () => {
           PromptStore.gist.setConfig(tokenInput.value, idInput.value);
           setStatus("Gist settings saved.");
+        };
+
+        gistViewBtn.onclick = () => {
+          const id = idInput.value.trim() || PromptStore.gist.config().id;
+          if (!id) return setStatus("No gist id yet — press Create gist first.");
+          window.open(PromptStore.gist.webUrl(id), "_blank", "noopener");
         };
 
         gistCreateBtn.onclick = async () => {

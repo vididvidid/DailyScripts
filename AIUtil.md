@@ -73,6 +73,7 @@ To carry the same library between browsers and machines, mirror it to one
    (Already have one? Paste its id into the *Gist id* field instead and press
    **Save**.)
 4. Press **Sync gist** whenever you want to push and pull.
+5. Press **View on GitHub** to open the gist on gist.github.com in a new tab.
 
 Sync is a three-step pull → merge → push, not an overwrite, so two machines
 editing different prompts will not clobber each other. Merging is per prompt,
@@ -80,7 +81,9 @@ last-write-wins on the prompt's own `updatedAt`. Deleting a prompt leaves a
 tombstone behind rather than removing the record, otherwise a sync from a
 machine that had not seen the delete would resurrect it.
 
-The gist holds one file, `aiutil-prompts.json`:
+The gist holds one file, `prompts.gist`, whose content is JSON. (Gists made
+before the rename used `aiutil-prompts.json`; that file is still read, and is
+removed on the next sync once its prompts are in `prompts.gist`.)
 
 ```json
 {
