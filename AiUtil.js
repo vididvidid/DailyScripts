@@ -35,6 +35,14 @@
  *               "View on GitHub" button opens the gist in a new tab
  *               Net also accepts GM.xmlHttpRequest, and a blocked request now
  *               says whether the stub lacks the grant or it is a bookmarklet
+ *
+ *  0.4.1        Bug fixes — Quick Dock:
+ *               It glued itself to the bare text field, so attaching a file
+ *               (which grows the card above the text, not the field) left it
+ *               sitting mid-card over the attachment; it now anchors to the
+ *               whole composer card
+ *               It drew over the site's own menus ("+" tools on Gemini); it
+ *               now hides while an open menu/listbox/dialog overlaps it
  */
 
 // ==UserScript==
@@ -554,6 +562,8 @@
                     transition: opacity 0.15s ease;
                 }
                 #${Config.DOM.QUICKDOCK_ID}.visible { display: flex; }
+                /* A site menu is open over us: step aside without losing layout. */
+                #${Config.DOM.QUICKDOCK_ID}.covered { visibility: hidden; pointer-events: none; }
                 #${Config.DOM.QUICKDOCK_ID}:hover { opacity: 1; }
                 #${Config.DOM.QUICKDOCK_ID} * { box-sizing: border-box; }
                 #${Config.DOM.QUICKDOCK_ID} .qd-scroll {
@@ -1844,6 +1854,35 @@
         }
       }
       return null;
+    },
+
+    /**
+     * The visible card around the editor — the rounded box that also holds
+     * attachments, the model picker and the send button. Anchoring to the bare
+     * editor puts anything glued to its top edge in the middle of the card as
+     * soon as a file chip is added above the text.
+     * @returns {HTMLElement} the outermost card-like ancestor, or the editor.
+     */
+    frameOf(editor) {
+      const base = editor.getBoundingClientRect();
+      const maxHeight = window.innerHeight * 0.6;
+      let frame = editor;
+      let el = editor.parentElement;
+      for (let depth = 0; el && depth < 12; depth++, el = el.parentElement) {
+        if (el === document.body || el === document.documentElement) break;
+        const rect = el.getBoundingClientRect();
+        // Past this we are into page layout, not the composer.
+        if (rect.height > maxHeight || rect.width > base.width + 400) break;
+        const style = window.getComputedStyle(el);
+        const radius = parseFloat(style.borderTopLeftRadius) || 0;
+        const painted =
+          style.boxShadow !== "none" ||
+          parseFloat(style.borderTopWidth) > 0 ||
+          !/^(transparent|rgba\(0, 0, 0, 0\))$/.test(style.backgroundColor);
+        if (radius >= 8 && painted) frame = el;
+      }
+      if (frame === editor) frame = editor.closest("form, fieldset") || editor;
+      return frame;
     },
 
     /** Puts the caret at the end of a contenteditable so insertText lands there. */
@@ -4195,7 +4234,8 @@
   const QuickDock = {
     _el: null,
     _scroll: null,
-    _target: null,
+    _target: null, // the composer card the bar is glued to
+    _editor: null, // the text field inside it
     _lastRect: "",
     _timer: null,
     _resizeObserver: null,
@@ -4292,6 +4332,37 @@
       if (QuickDock._el) QuickDock._el.classList.remove("visible");
     },
 
+    // Popups the host sites open from the composer ("+" tools, model picker…).
+    // Our z-index sits above most of them, so the bar would cut through them.
+    MENU_SELECTORS: [
+      "[role='menu']",
+      "[role='listbox']",
+      "[role='dialog']",
+      ".cdk-overlay-pane",
+      "[data-radix-popper-content-wrapper]",
+    ].join(","),
+
+    /** Hides the bar while any open site menu overlaps it. */
+    updateCovered() {
+      const bar = QuickDock._el;
+      if (!bar || !bar.classList.contains("visible")) return;
+      const b = bar.getBoundingClientRect();
+      let covered = false;
+      for (const menu of document.querySelectorAll(QuickDock.MENU_SELECTORS)) {
+        if (bar.contains(menu)) continue;
+        const r = menu.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        if (r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top) {
+          const style = window.getComputedStyle(menu);
+          if (style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0") {
+            covered = true;
+            break;
+          }
+        }
+      }
+      bar.classList.toggle("covered", covered);
+    },
+
     /**
      * Re-measures the composer and glues the bar to its top edge. Cheap enough
      * to call on every tick: it bails out unless the rect actually moved.
@@ -4331,12 +4402,20 @@
         return;
       }
       const bar = QuickDock.ensureEl();
-      const target = Composer.find();
-      if (!target) {
+      const editor = Composer.find();
+      if (!editor) {
         QuickDock._target = null;
+        QuickDock._editor = null;
         QuickDock.hide();
         return;
       }
+      // Re-resolve the card only when the editor changes: attachments grow the
+      // card, which the observer on it already picks up.
+      const target =
+        editor === QuickDock._editor && QuickDock._target && QuickDock._target.isConnected
+          ? QuickDock._target
+          : Composer.frameOf(editor);
+      QuickDock._editor = editor;
       if (target !== QuickDock._target) {
         QuickDock._target = target;
         QuickDock._lastRect = "";
@@ -4381,7 +4460,16 @@
         if (!QuickDock._target || !QuickDock._target.isConnected)
           QuickDock.sync();
         else QuickDock.position();
+        QuickDock.updateCovered();
       }, Config.QUICKDOCK_POLL_MS);
+
+      // Menus open and close on a click or key press, often with a short
+      // animation, so re-check right after one instead of waiting for the poll.
+      const checkMenus = () => {
+        [0, 120, 350].forEach((ms) => setTimeout(QuickDock.updateCovered, ms));
+      };
+      document.addEventListener("click", checkMenus, true);
+      document.addEventListener("keydown", checkMenus, true);
 
       // refresh() may already have found a composer before the observer
       // existed; clearing the target makes the next sync re-attach it.
