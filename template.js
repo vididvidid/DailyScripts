@@ -39,6 +39,7 @@
 // @grant        unsafeWindow
 // @connect      api.github.com
 // @connect      gist.githubusercontent.com
+// @noframes
 // @run-at       document-idle
 // ==/UserScript==
 

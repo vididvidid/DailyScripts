@@ -3,8 +3,12 @@
  * Author: vididvidid 
  * Created: 2026-07-27 22:31:14
  *
- * versions: 
- * 
+ * versions:
+ *
+ * 0.5.4          no longer runs a second time inside the live chat iframe
+ *                (duplicate ⇅ button and doubled sync timers on streams
+ *                and premieres with chat replay)
+ *
  * 0.5.3          the gist button was a 45%-opacity grey circle that read
  *                as a scroll widget, and in bookmarklet mode it is the only
  *                way into gist sync — until a token is connected it is now
@@ -117,6 +121,11 @@
  */
 (function () {
   'use strict';
+
+  // YouTube embeds same-origin iframes (live chat / chat replay), and a userscript
+  // matching youtube.com/* runs in each one — a second ⇅ button, a second set of
+  // sync timers. Only the top window gets the script.
+  if (window.top !== window.self) return;
 
   console.log(" AIUtils WSL Link Working! Timestamp: " + Date.now());
 

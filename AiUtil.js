@@ -47,6 +47,11 @@
  *               menus (Radix, role="menu"). The overlap check hides the bar
  *               on that exact markup in headless Chromium, so the live page
  *               differs somehow — not yet diagnosed
+ *               It sat on top of buttons the site floats just above the card
+ *               (Gemini's "Answer now" while generating), which showed
+ *               through the translucent bar; it now shrinks to its icons in
+ *               the right corner (full bar on hover), or hides if even the
+ *               corner is taken
  */
 
 // ==UserScript==
@@ -566,6 +571,13 @@
                     transition: opacity 0.15s ease;
                 }
                 #${Config.DOM.QUICKDOCK_ID}.visible { display: flex; }
+                /* A site button sits where the full bar would go: shrink to the
+                 * icons in the right corner, grow back leftward on hover. */
+                #${Config.DOM.QUICKDOCK_ID} { width: var(--qd-width, auto); }
+                #${Config.DOM.QUICKDOCK_ID}.tucked:not(:hover) { width: auto; }
+                #${Config.DOM.QUICKDOCK_ID}.tucked:not(:hover) .qd-scroll { display: none; }
+                /* Even the corner is taken: get out of the way entirely. */
+                #${Config.DOM.QUICKDOCK_ID}.blocked { visibility: hidden; pointer-events: none; }
                 /* A site menu is open over us: step aside without losing layout. */
                 #${Config.DOM.QUICKDOCK_ID}.covered { visibility: hidden; pointer-events: none; }
                 #${Config.DOM.QUICKDOCK_ID}:hover { opacity: 1; }
@@ -4368,6 +4380,32 @@
     },
 
     /**
+     * Sites float their own buttons in the strip just above the composer
+     * (Gemini's "Answer now" while it generates). Our bar is translucent and
+     * on top, so it would cut through them.
+     * @returns {boolean} whether a site control overlaps the given box.
+     */
+    hitsControl(top, left, width, height) {
+      const bar = QuickDock._el;
+      const card = QuickDock._target;
+      const controls = "button, a[href], [role='button']";
+      const columns = Math.max(1, Math.min(6, Math.round(width / 80)));
+      for (let i = 0; i <= columns; i++) {
+        const x = left + 4 + ((width - 8) * i) / columns;
+        for (const y of [top + 2, top + height / 2, top + height - 2]) {
+          for (const hit of document.elementsFromPoint(x, y)) {
+            if (bar.contains(hit) || (card && card.contains(hit))) continue;
+            const control = hit.closest(controls);
+            if (!control) continue;
+            const r = control.getBoundingClientRect();
+            if (r.width >= 4 && r.height >= 4) return true;
+          }
+        }
+      }
+      return false;
+    },
+
+    /**
      * Re-measures the composer and glues the bar to its top edge. Cheap enough
      * to call on every tick: it bails out unless the rect actually moved.
      */
@@ -4376,24 +4414,39 @@
       const target = QuickDock._target;
       if (!bar || !target) return;
       const rect = target.getBoundingClientRect();
-      const key = `${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)},${Math.round(rect.height)},${Math.round(bar.offsetHeight)}`;
-      if (key === QuickDock._lastRect) return;
-      QuickDock._lastRect = key;
-
       const barHeight = bar.offsetHeight || 32;
       const gap = 6;
       const width = Math.min(rect.width, window.innerWidth - 16);
+      let left = rect.left;
+      if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
+      if (left < 8) left = 8;
       // Prefer sitting above the composer; if there is no room up there (short
       // viewport, composer pinned to the top), sit just below it instead.
       let top = rect.top - barHeight - gap;
       if (top < 4) top = Math.min(rect.bottom + gap, window.innerHeight - barHeight - 4);
-      let left = rect.left;
-      if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
-      if (left < 8) left = 8;
+      top = Math.max(4, top);
 
-      bar.style.width = `${width}px`;
-      bar.style.left = `${left}px`;
-      bar.style.top = `${Math.max(4, top)}px`;
+      // Checked every tick: the site's floating buttons come and go while the
+      // composer itself stays put.
+      const tucked = QuickDock.hitsControl(top, left, width, barHeight);
+      const iconsWidth = 96; // the three icon buttons plus padding
+      const blocked =
+        tucked && QuickDock.hitsControl(top, left + width - iconsWidth, iconsWidth, barHeight);
+      // Don't collapse a bar the pointer is on; that would yank it away mid-click.
+      if (!bar.matches(":hover")) bar.classList.toggle("tucked", tucked);
+      bar.classList.toggle("blocked", blocked);
+
+      const key = `${Math.round(left)},${Math.round(top)},${Math.round(width)},${Math.round(rect.height)},${Math.round(barHeight)}`;
+      if (key === QuickDock._lastRect) return;
+      QuickDock._lastRect = key;
+
+      // Anchored by its right edge so the tucked icons sit in the corner and
+      // the full bar grows leftward from there.
+      bar.style.setProperty("--qd-width", `${width}px`);
+      bar.style.left = "";
+      // clientWidth, not innerWidth: `right` is measured from inside the scrollbar.
+      bar.style.right = `${document.documentElement.clientWidth - (left + width)}px`;
+      bar.style.top = `${top}px`;
       bar.classList.toggle("compact", width < 320);
     },
 
