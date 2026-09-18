@@ -52,12 +52,38 @@
  *               through the translucent bar; it now shrinks to its icons in
  *               the right corner (full bar on hover), or hides if even the
  *               corner is taken
+ *
+ *  0.5.0        SVG icons everywhere instead of text labels (PL, MD, …) and
+ *               glyph characters
+ *               Quick Dock tools that rewrite the input box in place:
+ *               JSON->TOON, Text Minifier, Snapcompact (text becomes an
+ *               attached image) and save-as-prompt
+ *               Context meter: a green / yellow / red light on the Quick Dock
+ *               for when to move to a new chat, with the breakdown, budget
+ *               and handoff prompt in the Floating Dock
+ *               The meter reads the whole conversation from the site's own
+ *               backend (old chats included, current branch only) and counts
+ *               it with the real tokenizer: o200k_base locally for ChatGPT /
+ *               Copilot, the providers' count APIs for Claude, Gemini and
+ *               Grok when a key is set; claude.ai plan usage shown too
+ *               New chat with context (Quick Dock arrow + Floating Dock
+ *               section): opens a new chat with the whole conversation in
+ *               the input box as a transcript, TOON, minified text or
+ *               Snapcompact images
+ *               Tooltips redone as cards (title, description, keys), with
+ *               no version number in them
+ *               "Experimental" tags on the context meter and the handoff
+ *               Inter font for both docks, loaded as bytes so site CSPs
+ *               cannot block it
+ *               Snapcompact pages open full size in a viewer (actual pixels
+ *               or fit, arrow keys between pages, click or Esc to close)
+ *               Source dropdowns show a chevron
  */
 
 // ==UserScript==
 // @name         ChatGPT / Claude / Copilot / Gemini / Grok AI Chat Exporter by RevivalStack
 // @namespace    [old]https://github.com/revivalstack/chatgpt-exporter
-// @version      3.8.0
+// @version      3.9.0
 // @description  Export your ChatGPT, Claude, Copilot, Gemini or Grok chat into a properly and elegantly formatted Markdown or JSON. Includes a Gist-synced Prompt Library with a Quick Dock over the site's input box, Text Minifier, JSON→TOON converter and Snapcompact — in one draggable, two-column icon-dock panel.
 // @author       vididvidid, Mic Mejia (Refactored UI)
 // @license      MIT License
@@ -72,6 +98,10 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
 // @connect      api.github.com
+// @connect      cdn.jsdelivr.net
+// @connect      api.anthropic.com
+// @connect      generativelanguage.googleapis.com
+// @connect      api.x.ai
 // @noframes
 // ==/UserScript==
 
@@ -112,7 +142,7 @@
    * 1. CONFIG — constants & persisted-setting keys. No logic lives here.
    * ========================================================================== */
   const Config = {
-    VERSION: "3.8.0",
+    VERSION: "3.9.0",
     DOM_READY_TIMEOUT_MS: 1000,
     AUTOSCROLL_INITIAL_DELAY_MS: 2000,
 
@@ -165,12 +195,74 @@
       GIST_ID: "aiUtil_gistId",
       GIST_LAST_SYNC: "aiUtil_gistLastSync",
       QUICKDOCK_ENABLED: "aiUtil_quickDockEnabled",
+      METER_BUDGETS: "aiUtil_meterBudgets", // { platformId: tokens }
+      METER_WARN_PCT: "aiUtil_meterWarnPct",
+      METER_CRIT_PCT: "aiUtil_meterCritPct",
+      METER_TOKENIZER: "aiUtil_meterTokenizer", // { provider: { key, model } }
+      O200K_CACHE: "aiUtil_o200kRanks_v1",
+      FONT_CACHE: "aiUtil_fontInter_v1",
+      HANDOFF_SETTINGS: "aiUtil_handoffSettings",
+      HANDOFF_PENDING: "aiUtil_handoffPending",
+    },
+
+    // Context meter. Budgets are a guess at where a chat starts to degrade,
+    // deliberately below each site's hard context window; editable per site
+    // from the meter panel.
+    METER: {
+      DEFAULT_BUDGETS: {
+        chatgpt: 100000,
+        claude: 150000,
+        copilot: 60000,
+        gemini: 400000,
+        grok: 100000,
+      },
+      FALLBACK_BUDGET: 100000,
+      WARN_PCT: 50,
+      CRIT_PCT: 80,
+      // Role/format tokens each turn costs on top of its text.
+      TURN_OVERHEAD: 4,
+      RECOUNT_DEBOUNCE_MS: 3000,
+      // The history is refetched at most this often while a chat is active.
+      HISTORY_MIN_INTERVAL_MS: 15000,
+      USAGE_REFRESH_MS: 60000,
+      // js-tiktoken's copy of OpenAI's o200k_base ranks (2.3 MB, cached).
+      O200K_URL: "https://cdn.jsdelivr.net/npm/js-tiktoken@1.0.21/dist/ranks/o200k_base.js",
+      HANDOFF_PROMPT:
+        "Summarize this conversation so I can continue it in a new chat. " +
+        "Include the goal, key decisions and why they were made, the current " +
+        "state of the work (code, files, versions), open questions, and the " +
+        "exact next steps. Be dense and skip pleasantries. Output only the summary.",
     },
 
     MARKDOWN: {
       TOC_PLACEHOLDER_LINK: "#table-of-contents",
       get BACK_TO_TOP_LINK() {
         return `___\n###### [top](${Config.MARKDOWN.TOC_PLACEHOLDER_LINK})\n`;
+      },
+    },
+
+    // Inter (variable, Latin subset) for the docks. Loaded as bytes, so the
+    // sites' font-src CSP does not apply; the system font is the fallback.
+    FONT: {
+      FAMILY: "AiUtil Inter",
+      URL: "https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-latin-wght-normal.woff2",
+    },
+
+    // "New chat with context": carries the conversation into a fresh chat.
+    HANDOFF: {
+      // A pending handoff older than this is ignored (the new tab never came).
+      TTL_MS: 3 * 60 * 1000,
+      // How long the new chat's page gets to show its input box.
+      COMPOSER_WAIT_MS: 30000,
+      DEFAULTS: {
+        format: "toon", // transcript | toon | minify | snapcompact
+        attachments: true,
+        tools: false,
+        newTab: true,
+        preamble:
+          "Below is our previous conversation, carried over as context. " +
+          "Read it, then continue from where it left off. Do not summarize " +
+          "it back to me; just confirm you have it and wait for my next message.",
       },
     },
 
@@ -190,7 +282,39 @@
    * 2. THEME — design tokens + stylesheet. Pure presentation, no behavior.
    * ========================================================================== */
   const Theme = {
-    fontStack: `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif`,
+    fontStack: `"${Config.FONT.FAMILY}", "Inter", "Inter Variable", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif`,
+    monoStack: `ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace`,
+
+    /**
+     * Registers Inter for the docks. The file is fetched once as bytes and
+     * kept in storage; a FontFace built from bytes is not a network load, so
+     * the sites' font-src CSP cannot block it. Any failure leaves the
+     * system-font fallback in place.
+     */
+    async loadFont() {
+      try {
+        if (typeof FontFace !== "function" || !document.fonts) return;
+        let b64 = Store.get(Config.GM_KEYS.FONT_CACHE, "");
+        if (!b64) {
+          const res = await Net.request({ url: Config.FONT.URL, responseType: "arraybuffer" });
+          if (res.status !== 200 || !res.body) return;
+          const bytes = new Uint8Array(res.body);
+          let bin = "";
+          for (let i = 0; i < bytes.length; i += 8192)
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+          b64 = btoa(bin);
+          Store.set(Config.GM_KEYS.FONT_CACHE, b64);
+        }
+        const bin = atob(b64);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        const face = new FontFace(Config.FONT.FAMILY, buf.buffer, { weight: "100 900", style: "normal" });
+        await face.load();
+        document.fonts.add(face);
+      } catch (e) {
+        /* offline, blocked @connect or no FontFace — keep the system font */
+      }
+    },
 
     // White & black design tokens — the single source of truth for all colors.
     tokens: {
@@ -207,6 +331,10 @@
       inputBg: "#ffffff",
       inputText: "#000000",
       shadow: "0 4px 12px rgba(0, 0, 0, 0.15)",
+      // Context meter levels.
+      meterOk: "#16a34a",
+      meterWarn: "#eab308",
+      meterCrit: "#dc2626",
     },
 
     /** Injects the panel-wide stylesheet exactly once. */
@@ -223,6 +351,14 @@
                     background: transparent;
                     color: ${t.textLight};
                     font-family: ${Theme.fontStack};
+                    font-size: 12.5px;
+                    line-height: 1.45;
+                    font-weight: 400;
+                    letter-spacing: -0.006em;
+                    font-feature-settings: "cv11", "ss01", "tnum";
+                    -webkit-font-smoothing: antialiased;
+                    -moz-osx-font-smoothing: grayscale;
+                    text-rendering: optimizeLegibility;
                     transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
                     transform-origin: top right;
                     transform: scale(0.65);
@@ -233,7 +369,7 @@
                 #${Config.DOM.PANEL_ID}.on-left {
                     transform-origin: top left;
                 }
-                #${Config.DOM.PANEL_ID} * { box-sizing: border-box; }
+                #${Config.DOM.PANEL_ID} * { box-sizing: border-box; font-family: inherit; letter-spacing: inherit; }
 
                 /* ---------- Icon rail (Fixed dimensions, anchors panel) ---------- */
                 #ai-exporter-rail {
@@ -262,8 +398,11 @@
                     user-select: none;
                     touch-action: none;
                     padding: 2px 0 4px 0;
+                    display: flex;
+                    justify-content: center;
                 }
                 #ai-exporter-rail-drag:active { cursor: grabbing; }
+
                 .ai-exporter-rail-spacer { flex: 1; min-height: 4px; }
 
                 .ai-exporter-rail-btn {
@@ -301,6 +440,7 @@
                 }
                 .ai-exporter-rail-btn:hover .rail-icon-emoji { font-size: 20px; }
                 .ai-exporter-rail-btn:hover .rail-icon-text { font-size: 11px; opacity: 1; color: #ffffff; }
+                .ai-exporter-rail-btn:hover .rail-icon-svg { width: 22px; height: 22px; }
 
                 /* Immediate siblings */
                 .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover),
@@ -317,6 +457,8 @@
                 .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn .rail-icon-emoji { font-size: 16px; }
                 .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover) .rail-icon-text,
                 .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn .rail-icon-text { font-size: 10px; color: #ffffff; }
+                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover) .rail-icon-svg,
+                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn .rail-icon-svg { width: 19px; height: 19px; }
 
                 /* 2nd level siblings */
                 .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover),
@@ -332,6 +474,8 @@
                 .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn .rail-icon-emoji { font-size: 14px; }
                 .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover) .rail-icon-text,
                 .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn .rail-icon-text { font-size: 9px; }
+                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover) .rail-icon-svg,
+                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn .rail-icon-svg { width: 17px; height: 17px; }
 
                 .ai-exporter-rail-btn.active {
                     background-color: #000000;
@@ -346,31 +490,82 @@
                     width: 30px; height: 30px; border-radius: 8px; margin: 0; border-width: 2px;
                 }
                 .ai-exporter-rail-btn.small-btn .rail-icon-emoji { font-size: 13px; margin: 0; }
+                .ai-exporter-rail-btn .rail-icon-svg {
+                    width: 16px; height: 16px; flex-shrink: 0; display: block;
+                    transition: width 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.1), height 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+                }
+                .ai-exporter-rail-btn.small-btn .rail-icon-svg { width: 14px; height: 14px; }
+                /* A toggle that is switched off (Quick Dock, auto-scroll). */
+                .ai-exporter-rail-btn.off .rail-icon-svg { opacity: 0.35; }
+                /* Status dot in a rail button's corner (context meter). */
+                .ai-exporter-rail-badge {
+                    position: absolute; top: 1px; right: 1px;
+                    width: 8px; height: 8px; border-radius: 50%;
+                    border: 1.5px solid #ffffff; background: ${t.meterOk};
+                    pointer-events: none;
+                }
+                .ai-exporter-rail-badge[data-level="warn"] { background: ${t.meterWarn}; }
+                .ai-exporter-rail-badge[data-level="crit"] { background: ${t.meterCrit}; }
 
+                /* Tooltip card: title, optional tag, one-line description, keys. */
                 .ai-exporter-tooltip {
                     position: absolute;
                     top: 50%;
                     right: calc(100% + 12px);
                     transform: translateY(-50%);
-                    background: #ffffff;
-                    border: 1px solid ${t.borderSoft};
-                    border-radius: 8px;
+                    width: max-content;
+                    max-width: 240px;
+                    background: #111111;
+                    color: #f5f5f5;
+                    border-radius: 9px;
                     padding: 8px 10px;
-                    font-size: 11px;
-                    color: ${t.textLight};
-                    white-space: normal;
-                    max-width: 50ch;
-                    box-shadow: ${t.shadow};
+                    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.06);
                     display: none;
+                    flex-direction: column;
+                    gap: 3px;
                     z-index: 2147483001;
                     pointer-events: none;
+                    text-align: left;
+                    font-size: 12px;
+                    font-weight: 400;
+                    line-height: 1.4;
+                    white-space: normal;
+                }
+                /* Arrow pointing at the rail. */
+                .ai-exporter-tooltip::after {
+                    content: ""; position: absolute; top: 50%; right: -4px;
+                    width: 8px; height: 8px; background: #111111;
+                    transform: translateY(-50%) rotate(45deg); border-radius: 1px;
                 }
                 #${Config.DOM.PANEL_ID}.on-left .ai-exporter-tooltip {
                     right: auto;
                     left: calc(100% + 12px);
                 }
-                .ai-exporter-rail-btn:hover .ai-exporter-tooltip { display: block; }
-                .ai-exporter-tooltip .ai-exporter-shortcut-row { white-space: nowrap; }
+                #${Config.DOM.PANEL_ID}.on-left .ai-exporter-tooltip::after { right: auto; left: -4px; }
+                .ai-exporter-rail-btn:hover .ai-exporter-tooltip { display: flex; }
+                .ai-exporter-tooltip .tt-head { display: flex; align-items: center; gap: 6px; }
+                .ai-exporter-tooltip .tt-title { font-size: 12.5px; font-weight: 600; color: #ffffff; letter-spacing: -0.01em; }
+                .ai-exporter-tooltip .tt-keys {
+                    margin-left: auto; padding-left: 10px; display: flex; gap: 3px;
+                }
+                .ai-exporter-tooltip kbd {
+                    font-family: ${Theme.monoStack}; font-size: 10px; font-weight: 500;
+                    color: #d4d4d4; background: rgba(255, 255, 255, 0.1);
+                    border: 1px solid rgba(255, 255, 255, 0.14); border-bottom-width: 2px;
+                    border-radius: 4px; padding: 0 4px; line-height: 15px;
+                }
+                .ai-exporter-tooltip .tt-desc { font-size: 11.5px; color: #a3a3a3; }
+                .ai-exporter-tooltip .ai-exporter-tag { background: #fde68a; color: #713f12; border-color: transparent; }
+
+                /* "Experimental" marker for features still being tuned. */
+                .ai-exporter-tag {
+                    display: inline-flex; align-items: center; gap: 3px;
+                    font-size: 9.5px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase;
+                    color: #92400e; background: #fef3c7; border: 1px solid #fcd34d;
+                    border-radius: 999px; padding: 1px 6px 1px 5px; line-height: 14px;
+                    white-space: nowrap; flex-shrink: 0;
+                }
+                .ai-exporter-tag svg { width: 10px; height: 10px; }
 
                 /* ---------- Global Collapsed "Eye" State ---------- */
                 #${Config.DOM.PANEL_ID}.global-collapsed #ai-exporter-rail {
@@ -417,9 +612,9 @@
                     flex-shrink: 0;
                 }
                 #ai-exporter-content-title {
-                    flex: 1; font-size: 13px; font-weight: 700;
+                    flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; letter-spacing: -0.015em;
                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-                    color: ${t.textLight};
+                    color: ${t.textLight}; display: flex; align-items: center; gap: 8px;
                 }
                 #ai-exporter-content-body {
                     overflow-y: auto; overflow-x: hidden; padding: 10px;
@@ -436,7 +631,7 @@
                 .ai-exporter-btn {
                     flex: 1 1 auto; min-width: 74px; height: 32px;
                     border: none; border-radius: 8px; background: ${t.buttonGradient};
-                    color: #fff; font-size: 12px; font-weight: 700; cursor: pointer;
+                    color: #fff; font-size: 12px; font-weight: 600; letter-spacing: -0.005em; cursor: pointer;
                     display: inline-flex; align-items: center; justify-content: center; gap: 5px;
                     padding: 0 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.3);
                 }
@@ -456,11 +651,11 @@
                 #${Config.DOM.PANEL_ID} input[type="password"] {
                     width: 100%; background: ${t.inputBg}; color: ${t.inputText};
                     border: 1px solid ${t.borderSoft}; border-radius: 6px;
-                    padding: 6px 8px; font-size: 12px; font-family: ${Theme.fontStack};
+                    padding: 6px 8px; font-size: 12px; font-family: inherit; line-height: 1.4;
                 }
                 #${Config.DOM.PANEL_ID} input[type="text"]:focus, #${Config.DOM.PANEL_ID} textarea:focus,
                 #${Config.DOM.PANEL_ID} input[type="password"]:focus { outline: 2px solid #000000; }
-                #${Config.DOM.PANEL_ID} textarea { resize: vertical; font-family: monospace; }
+                #${Config.DOM.PANEL_ID} textarea { resize: vertical; font-family: ${Theme.monoStack}; font-size: 11.5px; }
                 .ai-exporter-select-all-row {
                     display: flex; align-items: center; gap: 6px; font-size: 11px;
                     color: ${t.textLight}; margin-bottom: 6px;
@@ -488,12 +683,79 @@
                     background: #f5f5f5; color: ${t.textLight}; border: 1px solid ${t.borderSoft};
                     border-radius: 5px; padding: 1px 6px; font-family: monospace; font-size: 11px;
                 }
-                .ai-exporter-status-line { font-size: 11px; color: ${t.textMuted}; }
+                .ai-exporter-status-line { font-size: 11px; line-height: 1.45; color: ${t.textMuted}; }
                 .ai-exporter-preview-img {
                     width: 100%; max-height: 160px; object-fit: contain; background: #fff;
                     border-radius: 6px; border: 1px solid ${t.borderSoft}; margin-top: 6px; image-rendering: pixelated;
+                    cursor: zoom-in; display: block;
                 }
-                .ai-exporter-section-label { font-weight: 600; display: block; margin-bottom: 4px; }
+                .ai-exporter-preview-img:hover { box-shadow: 0 0 0 2px #000000; }
+
+                /* Select with a visible chevron, so it reads as a dropdown. */
+                .ai-exporter-select-wrap { position: relative; }
+                #${Config.DOM.PANEL_ID} .ai-exporter-select-wrap select {
+                    -webkit-appearance: none; -moz-appearance: none; appearance: none;
+                    padding-right: 30px; cursor: pointer; background-image: none;
+                }
+                .ai-exporter-select-wrap svg {
+                    position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+                    width: 14px; height: 14px; pointer-events: none; color: ${t.textMuted};
+                }
+                .ai-exporter-select-wrap:hover svg { color: ${t.textLight}; }
+
+                /* ---------- Full-size image viewer (Snapcompact pages) ---------- */
+                #ai-exporter-lightbox {
+                    position: fixed; inset: 0; z-index: 2147483600;
+                    background: rgba(10, 10, 10, 0.88); backdrop-filter: blur(3px);
+                    display: flex; flex-direction: column;
+                    font-family: ${Theme.fontStack}; font-size: 12.5px; color: #f5f5f5;
+                    -webkit-font-smoothing: antialiased; cursor: zoom-out;
+                }
+                #ai-exporter-lightbox * { box-sizing: border-box; font-family: inherit; }
+                #ai-exporter-lightbox .lb-bar {
+                    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+                    padding: 10px 14px; padding-top: calc(10px + env(safe-area-inset-top, 0px));
+                    background: rgba(0, 0, 0, 0.55); cursor: default;
+                }
+                #ai-exporter-lightbox .lb-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+                #ai-exporter-lightbox .lb-title { font-weight: 600; font-size: 13px; color: #ffffff; }
+                #ai-exporter-lightbox .lb-sub { font-size: 11.5px; color: #a3a3a3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                #ai-exporter-lightbox button {
+                    height: 30px; min-width: 30px; padding: 0 10px; border-radius: 8px;
+                    border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.08);
+                    color: #ffffff; font-size: 12px; font-weight: 500; cursor: pointer;
+                    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+                }
+                #ai-exporter-lightbox button:hover { background: rgba(255, 255, 255, 0.2); }
+                #ai-exporter-lightbox button:disabled { opacity: 0.35; cursor: default; }
+                #ai-exporter-lightbox button svg { width: 16px; height: 16px; }
+                #ai-exporter-lightbox .lb-stage {
+                    flex: 1; min-height: 0; overflow: auto; display: flex;
+                    padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+                }
+                /* margin:auto centres when smaller and still scrolls from the top-left when larger. */
+                #ai-exporter-lightbox canvas {
+                    margin: auto; background: #ffffff; flex-shrink: 0;
+                    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); border-radius: 2px;
+                }
+                #ai-exporter-lightbox.fit canvas {
+                    max-width: 100%; max-height: 100%; width: auto; height: auto; image-rendering: auto;
+                }
+                #ai-exporter-lightbox:not(.fit) canvas { image-rendering: pixelated; }
+                #ai-exporter-lightbox .lb-hint { font-size: 11px; color: #8a8a8a; white-space: nowrap; }
+                @media (max-width: 560px) { #ai-exporter-lightbox .lb-hint { display: none; } }
+                .ai-exporter-section-label { font-size: 12px; font-weight: 600; display: block; margin-bottom: 4px; color: ${t.textLight}; }
+                .ai-exporter-check-row { display: flex; align-items: center; gap: 7px; font-size: 12px; cursor: pointer; }
+                .ai-exporter-check-row input { margin: 0; }
+                .ai-exporter-radio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+                .ai-exporter-radio-card {
+                    position: relative; display: flex; flex-direction: column; gap: 1px; cursor: pointer;
+                    border: 1px solid rgba(0, 0, 0, 0.18); border-radius: 8px; padding: 6px 8px;
+                }
+                .ai-exporter-radio-card:has(input:checked) { border-color: #000000; box-shadow: inset 0 0 0 1px #000000; }
+                .ai-exporter-radio-card input { position: absolute; opacity: 0; pointer-events: none; }
+                .ai-exporter-radio-card b { font-size: 12px; font-weight: 600; }
+                .ai-exporter-radio-card span { font-size: 10.5px; color: ${t.textMuted}; line-height: 1.3; }
 
                 /* ---------- Prompt library ---------- */
                 .ai-exporter-prompt-list {
@@ -535,6 +797,41 @@
                     display: flex; flex-direction: column; gap: 6px;
                 }
                 .ai-exporter-fieldset[hidden] { display: none; }
+                .ai-exporter-icon-btn svg { width: 14px; height: 14px; }
+                .ai-exporter-mini-btn svg { width: 12px; height: 12px; }
+
+                /* ---------- Context meter ---------- */
+                .ai-exporter-meter-status {
+                    border: 1px solid ${t.borderSoft}; border-left: 6px solid var(--meter-color);
+                    border-radius: 8px; padding: 8px 10px;
+                }
+                .ai-exporter-meter-status b { display: block; font-size: 14px; font-weight: 650; letter-spacing: -0.015em; color: var(--meter-color); }
+                .ai-exporter-meter-status span { font-size: 11px; color: ${t.textMuted}; }
+                .ai-exporter-meter-bar {
+                    position: relative; height: 12px; border-radius: 6px;
+                    background: #eeeeee; overflow: hidden; border: 1px solid rgba(0,0,0,0.15);
+                }
+                .ai-exporter-meter-fill {
+                    height: 100%; width: 0; background: var(--meter-color);
+                    transition: width 0.3s ease, background 0.3s ease;
+                }
+                .ai-exporter-meter-tick {
+                    position: absolute; top: 0; bottom: 0; width: 2px;
+                    background: rgba(0, 0, 0, 0.45);
+                }
+                .ai-exporter-meter-caption {
+                    display: flex; justify-content: space-between; font-size: 11px;
+                    color: ${t.textMuted};
+                }
+                .ai-exporter-meter-grid {
+                    display: grid; grid-template-columns: 1fr auto; gap: 3px 10px;
+                    font-size: 11.5px;
+                }
+                .ai-exporter-meter-grid span:nth-child(odd) { color: ${t.textMuted}; }
+                .ai-exporter-meter-grid span:nth-child(even) { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+                .ai-exporter-inline-fields { display: flex; gap: 6px; }
+                .ai-exporter-inline-fields label { flex: 1; font-size: 11px; color: ${t.textMuted}; display: flex; flex-direction: column; gap: 2px; }
+
                 .ai-exporter-divider {
                     border-top: 1px dashed ${t.borderSoft}; margin: 2px 0 0 0; padding-top: 6px;
                 }
@@ -581,7 +878,7 @@
                 /* A site menu is open over us: step aside without losing layout. */
                 #${Config.DOM.QUICKDOCK_ID}.covered { visibility: hidden; pointer-events: none; }
                 #${Config.DOM.QUICKDOCK_ID}:hover { opacity: 1; }
-                #${Config.DOM.QUICKDOCK_ID} * { box-sizing: border-box; }
+                #${Config.DOM.QUICKDOCK_ID} * { box-sizing: border-box; font-family: inherit; }
                 #${Config.DOM.QUICKDOCK_ID} .qd-scroll {
                     display: flex; align-items: center; gap: 5px;
                     overflow-x: auto; overflow-y: hidden;
@@ -594,7 +891,7 @@
                     height: 24px; padding: 0 9px;
                     border-radius: 12px; border: 1px solid rgba(0, 0, 0, 0.25);
                     background: #ffffff; color: #000000;
-                    font-size: 11.5px; font-weight: 600; font-family: inherit;
+                    font-size: 11.5px; font-weight: 500; font-family: inherit; letter-spacing: -0.005em;
                     cursor: pointer; white-space: nowrap;
                     overflow: hidden; text-overflow: ellipsis;
                 }
@@ -613,8 +910,141 @@
                 }
                 /* Narrow composers (mobile / split panes): drop the hint text. */
                 #${Config.DOM.QUICKDOCK_ID}.compact .qd-empty { display: none; }
+                #${Config.DOM.QUICKDOCK_ID} .qd-tools {
+                    display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
+                }
+                #${Config.DOM.QUICKDOCK_ID} .qd-icon svg { width: 14px; height: 14px; display: block; }
+                #${Config.DOM.QUICKDOCK_ID} .qd-icon:disabled { opacity: 0.4; cursor: progress; }
+                #${Config.DOM.QUICKDOCK_ID} .qd-sep {
+                    width: 1px; height: 16px; background: rgba(0, 0, 0, 0.2); flex: 0 0 auto;
+                }
+                /* Context meter: a plain traffic light. Details live in the Floating Dock. */
+                #${Config.DOM.QUICKDOCK_ID} .qd-meter-dot {
+                    width: 11px; height: 11px; border-radius: 50%;
+                    background: ${t.meterOk}; box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.2);
+                }
+                #${Config.DOM.QUICKDOCK_ID} .qd-meter[data-level="warn"] .qd-meter-dot {
+                    background: ${t.meterWarn}; box-shadow: 0 0 0 2px rgba(234, 179, 8, 0.25);
+                }
+                #${Config.DOM.QUICKDOCK_ID} .qd-meter[data-level="crit"] .qd-meter-dot {
+                    background: ${t.meterCrit}; box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.25);
+                    animation: qd-pulse 1.4s ease-in-out infinite;
+                }
+                #${Config.DOM.QUICKDOCK_ID} .qd-meter:hover .qd-meter-dot { box-shadow: 0 0 0 2px #ffffff; }
+                /* Red is worth seeing without hovering. */
+                #${Config.DOM.QUICKDOCK_ID}.level-crit { opacity: 0.9; }
+                @keyframes qd-pulse { 50% { transform: scale(0.7); } }
+                #${Config.DOM.QUICKDOCK_ID} .qd-toast {
+                    position: absolute; right: 0; bottom: calc(100% + 4px);
+                    background: #000000; color: #ffffff; font-size: 11px; font-weight: 600;
+                    padding: 4px 8px; border-radius: 6px; white-space: nowrap;
+                    pointer-events: none; opacity: 0; transition: opacity 0.15s ease;
+                }
+                #${Config.DOM.QUICKDOCK_ID} .qd-toast.show { opacity: 1; }
       `;
       document.head.appendChild(quickStyle);
+    },
+  };
+
+  /* ==========================================================================
+   * 2b. ICONS — inline SVG glyphs (shapes from Lucide, ISC licence).
+   *
+   * Built node by node with createElementNS instead of an HTML string: Gemini
+   * enforces Trusted Types, which throws on any markup assigned to the DOM.
+   * ========================================================================== */
+  const Icons = {
+    // 24x24 stroke grid. A string is a <path d>; an array is [tag, attributes].
+    glyphs: {
+      grip: [
+        ["circle", { cx: 5, cy: 9, r: 1 }], ["circle", { cx: 12, cy: 9, r: 1 }],
+        ["circle", { cx: 19, cy: 9, r: 1 }], ["circle", { cx: 5, cy: 15, r: 1 }],
+        ["circle", { cx: 12, cy: 15, r: 1 }], ["circle", { cx: 19, cy: 15, r: 1 }],
+      ],
+      library: [
+        "M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z",
+        "M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z",
+      ],
+      markdown: [
+        "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
+        "M14 2v4a2 2 0 0 0 2 2h4", "M10 9H8", "M16 13H8", "M16 17H8",
+      ],
+      json: [
+        "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
+        "M14 2v4a2 2 0 0 0 2 2h4",
+        "M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1",
+        "M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1",
+      ],
+      sliders: [
+        "M21 4h-7", "M10 4H3", "M21 12h-9", "M8 12H3", "M21 20h-5", "M12 20H3",
+        "M14 2v4", "M8 10v4", "M16 18v4",
+      ],
+      toon: [
+        "M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1",
+        "M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1",
+      ],
+      minify: [
+        "m15 15 6 6m-6-6v4.8m0-4.8h4.8", "M9 19.8V15m0 0H4.2M9 15l-6 6",
+        "M15 4.2V9m0 0h4.8M15 9l6-6", "M9 4.2V9m0 0H4.2M9 9 3 3",
+      ],
+      image: [
+        ["rect", { x: 3, y: 3, width: 18, height: 18, rx: 2 }],
+        ["circle", { cx: 9, cy: 9, r: 2 }],
+        "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21",
+      ],
+      quick: [
+        "M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z",
+      ],
+      gauge: ["m12 14 4-4", "M3.34 19a10 10 0 1 1 17.32 0"],
+      scrollTop: ["M5 3h14", "m18 13-6-6-6 6", "M12 7v14"],
+      eye: [
+        "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0",
+        ["circle", { cx: 12, cy: 12, r: 3 }],
+      ],
+      close: ["M18 6 6 18", "m6 6 12 12"],
+      copy: [
+        ["rect", { x: 8, y: 8, width: 14, height: 14, rx: 2 }],
+        "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2",
+      ],
+      edit: [
+        "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
+      ],
+      trash: [
+        "M3 6h18", "M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6",
+        "M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2",
+      ],
+      chevronDown: ["m6 9 6 6 6-6"],
+      chevronLeft: ["m15 18-6-6 6-6"],
+      chevronRight: ["m9 18 6-6-6-6"],
+      maximize: ["M15 3h6v6", "M9 21H3v-6", "m21 3-7 7", "m3 21 7-7"],
+      handoff: [
+        "M21 12v3a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h7", "M16 3h5v5", "m16 8 5-5",
+      ],
+      flask: [
+        "M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2",
+        "M6.453 15h11.094", "M8.5 2h7",
+      ],
+      bookmarkPlus: [
+        "m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z", "M12 7v6", "M15 10H9",
+      ],
+    },
+
+    /** @returns {SVGSVGElement} a currentColor stroke icon. */
+    make(name, size = 16) {
+      const NS = "http://www.w3.org/2000/svg";
+      const svg = document.createElementNS(NS, "svg");
+      const attrs = {
+        viewBox: "0 0 24 24", width: size, height: size, fill: "none",
+        stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round",
+        "stroke-linejoin": "round", "aria-hidden": "true",
+      };
+      Object.entries(attrs).forEach(([k, v]) => svg.setAttribute(k, v));
+      (Icons.glyphs[name] || []).forEach((part) => {
+        const [tag, shapeAttrs] = typeof part === "string" ? ["path", { d: part }] : part;
+        const node = document.createElementNS(NS, tag);
+        Object.entries(shapeAttrs).forEach(([k, v]) => node.setAttribute(k, v));
+        svg.appendChild(node);
+      });
+      return svg;
     },
   };
 
@@ -643,6 +1073,39 @@
 
     truncate(str, len = 70) {
       return str.length <= len ? str : str.slice(0, len).trim() + "…";
+    },
+
+    /**
+     * Rough token count without a tokenizer: ~4 ASCII characters per token,
+     * and one per non-ASCII character (CJK, emoji and the like tokenize far
+     * worse than English). Good enough for a traffic light, not for billing.
+     */
+    estimateTokens(text) {
+      if (!text) return 0;
+      let ascii = 0;
+      let other = 0;
+      for (let i = 0; i < text.length; i++) {
+        if (text.charCodeAt(i) < 128) ascii++;
+        else other++;
+      }
+      return Math.ceil(ascii / 4 + other);
+    },
+
+    /** Fast 32-bit FNV-1a, for spotting an unchanged transcript. */
+    hash(str) {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+      }
+      return (h >>> 0).toString(36) + str.length.toString(36);
+    },
+
+    /** 950 -> "950", 4210 -> "4.2k", 152000 -> "152k". */
+    formatTokens(n) {
+      if (n < 1000) return String(n);
+      if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+      return `${Math.round(n / 1000)}k`;
     },
 
     escapeMd(text) {
@@ -734,7 +1197,7 @@
    * ========================================================================== */
   const Net = {
     /** @returns {Promise<{status:number, text:string}>} */
-    request({ method = "GET", url, headers = {}, body = null }) {
+    request({ method = "GET", url, headers = {}, body = null, responseType = "" }) {
       return new Promise((resolve, reject) => {
         // A stub may grant either spelling; GM.xmlHttpRequest is the GM4 form.
         const gmXhr =
@@ -750,13 +1213,18 @@
             headers,
             data: body,
             timeout: Config.GIST.TIMEOUT_MS,
+            ...(responseType ? { responseType } : {}),
             onload: (res) =>
-              resolve({ status: res.status, text: res.responseText || "" }),
+              resolve({
+                status: res.status,
+                text: responseType ? "" : res.responseText || "",
+                body: res.response,
+              }),
             onerror: () =>
               reject(
                 new Error(
                   "Network error. Check that your Tampermonkey stub grants " +
-                    "GM_xmlhttpRequest and @connect api.github.com.",
+                    `GM_xmlhttpRequest and @connect ${new URL(url).hostname}.`,
                 ),
               ),
             ontimeout: () => reject(new Error("Request timed out.")),
@@ -764,7 +1232,11 @@
           return;
         }
         fetch(url, { method, headers, body })
-          .then((r) => r.text().then((text) => resolve({ status: r.status, text })))
+          .then((r) =>
+            responseType === "arraybuffer"
+              ? r.arrayBuffer().then((buf) => resolve({ status: r.status, text: "", body: buf }))
+              : r.text().then((text) => resolve({ status: r.status, text })),
+          )
           .catch((e) => {
             // Say which environment we are in: grants written inside this
             // @require'd file are ignored, only the installed stub's count.
@@ -772,10 +1244,10 @@
               typeof GM_info !== "undefined" && GM_info ? GM_info.scriptHandler : "";
             const hint =
               handler === "bookmarklet"
-                ? "Bookmarklets cannot bypass it — sync from desktop Tampermonkey instead."
+                ? "Bookmarklets cannot bypass it — use desktop Tampermonkey instead."
                 : "GM_xmlhttpRequest is not granted to this script. Grants inside " +
                   "AiUtil.js are ignored when it is loaded via @require — add " +
-                  "'// @grant GM_xmlhttpRequest' and '// @connect api.github.com' " +
+                  `'// @grant GM_xmlhttpRequest' and '// @connect ${new URL(url).hostname}' ` +
                   "to the installed stub's header in the Tampermonkey editor, save, " +
                   "and reload the page.";
             reject(new Error(`${e.message} — the page's CSP blocked it. ${hint}`));
@@ -1546,6 +2018,355 @@
   };
 
   /* ==========================================================================
+   * 7b. HISTORY — the whole conversation from the site's own backend.
+   *
+   * The page only holds what is rendered (Gemini lazy-loads older turns,
+   * others virtualise long chats), so an old chat looks short from the DOM.
+   * These adapters ask the site for the full thread, the same way it loads
+   * it itself: same-origin, with the session the page already has. Shapes
+   * follow the open-source exporters that read these endpoints
+   * (pionxzh/chatgpt-exporter, agoramachina/claude-exporter,
+   * pinguarmy/ai-chat-exporter, llg1634/grok-full-exporter).
+   *
+   *   conversationId()      -> string  — "" on a new or unsaved chat
+   *   fetchHistory(id)      -> { items, model?, uncounted? }
+   *     items: [{ role: "user"|"ai", kind, text }] in order, current branch
+   *     only. kind is "message", or "instructions" / "memory" / "tool" /
+   *     "attachment" for context the model reads but the page hides.
+   *     uncounted: images and files whose tokens cannot be known here.
+   *   fetchUsage()          -> [{ label, percent, resetsAt }] (optional)
+   * ========================================================================== */
+  const History = {
+    async getJson(url, options = {}) {
+      const res = await fetch(url, {
+        credentials: "include",
+        ...options,
+        headers: { accept: "application/json", ...(options.headers || {}) },
+      });
+      if (!res.ok) throw new Error(`${new URL(url, location.href).pathname} → HTTP ${res.status}`);
+      return res.json();
+    },
+
+    cookie(name) {
+      const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+      return match ? decodeURIComponent(match[1]) : "";
+    },
+
+    /** Oldest-first path from a leaf up to the root through parent links. */
+    walkBranch(byId, leafId, parentOf) {
+      const branch = [];
+      const seen = new Set();
+      for (let id = leafId; id && byId.has(id) && !seen.has(id); id = parentOf(byId.get(id))) {
+        seen.add(id);
+        branch.unshift(byId.get(id));
+      }
+      return branch;
+    },
+  };
+
+  /* ---- ChatGPT: /backend-api/conversation/{id}, bearer from /api/auth/session */
+  Object.assign(Platforms.registry.chatgpt, {
+    _auth: null,
+
+    conversationId() {
+      const m = location.pathname.match(/^\/(?:c|g\/[a-z0-9-]+\/c)\/([a-z0-9-]+)/i);
+      return m ? m[1] : "";
+    },
+
+    async authHeaders() {
+      const self = Platforms.registry.chatgpt;
+      if (!self._auth || Date.now() - self._auth.at > 10 * 60 * 1000) {
+        const session = await History.getJson("/api/auth/session");
+        if (!session?.accessToken) throw new Error("not signed in");
+        const headers = { authorization: `Bearer ${session.accessToken}` };
+        // Team workspaces answer only with the workspace's account id.
+        const workspace = History.cookie("_account");
+        if (workspace) {
+          try {
+            const check = await History.getJson("/backend-api/accounts/check/v4-2023-04-27", { headers });
+            const accountId = check?.accounts?.[workspace]?.account?.account_id;
+            if (accountId) headers["chatgpt-account-id"] = accountId;
+          } catch (e) {
+            /* personal account — no header needed */
+          }
+        }
+        self._auth = { at: Date.now(), headers };
+      }
+      return self._auth.headers;
+    },
+
+    async fetchHistory(id) {
+      const self = Platforms.registry.chatgpt;
+      const data = await History.getJson(`/backend-api/conversation/${id}`, {
+        headers: await self.authHeaders(),
+      });
+      const byId = new Map(Object.entries(data.mapping || {}));
+      const leaf =
+        data.current_node ||
+        [...byId.values()].find((n) => !n.children || !n.children.length)?.id;
+      const branch = History.walkBranch(byId, leaf, (n) => n.parent);
+
+      const items = [];
+      let uncounted = 0;
+      let model = "";
+      branch.forEach(({ message: msg }) => {
+        if (!msg || !msg.content) return;
+        const c = msg.content;
+        const role = msg.author?.role;
+        if (msg.metadata?.model_slug) model = msg.metadata.model_slug;
+        // Reasoning is not carried into later turns.
+        if (c.content_type === "thoughts" || c.content_type === "reasoning_recap") return;
+        let text = "";
+        let kind = "message";
+        switch (c.content_type) {
+          case "text":
+          case "multimodal_text":
+            (c.parts || []).forEach((p) => {
+              if (typeof p === "string") text += (text ? "\n" : "") + p;
+              else if (p && typeof p === "object") uncounted++;
+            });
+            break;
+          case "code":
+          case "execution_output":
+          case "tether_quote":
+            text = c.text || "";
+            break;
+          case "tether_browsing_display":
+            text = c.result || "";
+            break;
+          case "user_editable_context":
+            text = [c.user_profile, c.user_instructions].filter(Boolean).join("\n");
+            kind = "instructions";
+            break;
+          case "model_editable_context":
+            text = c.model_set_context || "";
+            kind = "memory";
+            break;
+          default:
+            text = typeof c.text === "string" ? c.text : "";
+        }
+        if (!text.trim()) return;
+        if (kind === "message" && (role === "tool" || role === "system" || msg.recipient !== "all")) kind = "tool";
+        if (kind === "message" && msg.metadata?.is_visually_hidden_from_conversation) kind = "instructions";
+        items.push({ role: role === "user" ? "user" : "ai", kind, text });
+      });
+      return { items, model, uncounted };
+    },
+  });
+
+  /* ---- Claude: /api/organizations/{org}/chat_conversations/{id}?tree=True */
+  Object.assign(Platforms.registry.claude, {
+    _orgId: "",
+
+    conversationId() {
+      const m = location.pathname.match(/\/chat\/([a-f0-9-]{36})/i);
+      return m ? m[1] : "";
+    },
+
+    async orgId() {
+      const self = Platforms.registry.claude;
+      if (self._orgId) return self._orgId;
+      const orgs = await History.getJson("/api/organizations");
+      const active = History.cookie("lastActiveOrg");
+      const org =
+        orgs.find((o) => o.uuid === active) ||
+        orgs.find((o) => (o.capabilities || []).includes("chat")) ||
+        orgs[0];
+      if (!org) throw new Error("no organization");
+      self._orgId = org.uuid;
+      return self._orgId;
+    },
+
+    async fetchHistory(id) {
+      const org = await Platforms.registry.claude.orgId();
+      const data = await History.getJson(
+        `/api/organizations/${org}/chat_conversations/${id}?tree=True&rendering_mode=messages&render_all_tools=true`,
+      );
+      const messages = data.chat_messages || [];
+      const byId = new Map(messages.map((m) => [m.uuid, m]));
+      const branch = data.current_leaf_message_uuid
+        ? History.walkBranch(byId, data.current_leaf_message_uuid, (m) => m.parent_message_uuid)
+        : messages;
+
+      const items = [];
+      let uncounted = 0;
+      branch.forEach((msg) => {
+        const role = msg.sender === "human" ? "user" : "ai";
+        (msg.attachments || []).forEach((a) => {
+          if (a.extracted_content)
+            items.push({ role: "user", kind: "attachment", text: a.extracted_content });
+        });
+        uncounted += (msg.files_v2 || msg.files || []).length;
+        const blocks = Array.isArray(msg.content) && msg.content.length
+          ? msg.content
+          : [{ type: "text", text: msg.text || "" }];
+        let text = "";
+        blocks.forEach((b) => {
+          if (b.type === "text" && b.text) text += (text ? "\n\n" : "") + b.text;
+          else if (b.type === "tool_use") {
+            items.push({ role: "ai", kind: "tool", text: JSON.stringify(b.input || {}) });
+          } else if (b.type === "tool_result") {
+            const out = Array.isArray(b.content)
+              ? b.content.map((x) => x.text || "").join("\n")
+              : typeof b.content === "string" ? b.content : "";
+            if (out) items.push({ role: "user", kind: "tool", text: out });
+          }
+          // Thinking is dropped from later turns, so it is not counted.
+        });
+        if (text.trim()) items.push({ role, kind: "message", text });
+      });
+      return { items, model: data.model || "", uncounted };
+    },
+
+    /**
+     * claude.ai's own plan usage: GET /api/organizations/{org}/usage. Newer
+     * builds send limits[] {kind, percent, resets_at}; older ones five_hour /
+     * seven_day {utilization, resets_at}. Quota, not context — shown as-is.
+     */
+    async fetchUsage() {
+      const org = await Platforms.registry.claude.orgId();
+      const data = await History.getJson(`/api/organizations/${org}/usage`);
+      const names = { session: "5-hour session", weekly_all: "Weekly", weekly_scoped: "Weekly (model)" };
+      if (Array.isArray(data?.limits) && data.limits.length)
+        return data.limits
+          .filter((l) => typeof l.percent === "number")
+          .map((l) => ({
+            label: (names[l.kind] || l.kind) +
+              (l.scope?.model?.display_name ? ` — ${l.scope.model.display_name}` : ""),
+            percent: l.percent,
+            resetsAt: l.resets_at || "",
+          }));
+      return [
+        ["five_hour", "5-hour session"], ["seven_day", "Weekly"],
+        ["seven_day_opus", "Weekly — Opus"], ["seven_day_sonnet", "Weekly — Sonnet"],
+      ]
+        .filter(([key]) => data?.[key] && typeof data[key].utilization === "number")
+        .map(([key, label]) => ({
+          label,
+          // Seen both as 0-1 and as 0-100.
+          percent: data[key].utilization <= 1 ? data[key].utilization * 100 : data[key].utilization,
+          resetsAt: data[key].resets_at || "",
+        }));
+    },
+  });
+
+  /* ---- Grok: /rest/app-chat/conversations/{id}/response-node + load-responses.
+   * Field names are less settled than the others, so several spellings are
+   * accepted, and an empty result falls back to the page. */
+  Object.assign(Platforms.registry.grok, {
+    conversationId() {
+      const m = location.pathname.match(/\/c\/([a-z0-9-]+)/i);
+      return m ? m[1] : "";
+    },
+
+    async fetchHistory(id) {
+      const base = `/rest/app-chat/conversations/${id}`;
+      const tree = await History.getJson(`${base}/response-node?includeThreads=true`);
+      const nodes = tree.responseNodes || tree.response_nodes || [];
+      const idOf = (n) => n.responseId || n.id;
+      const parentOf = (n) => n.parentResponseId || n.parent_response_id || "";
+      // Follow the branch from the newest node when parent links exist.
+      let chain = nodes;
+      if (nodes.some(parentOf)) {
+        const byId = new Map(nodes.map((n) => [idOf(n), n]));
+        chain = History.walkBranch(byId, idOf(nodes[nodes.length - 1]), parentOf);
+      }
+      const ids = chain.map(idOf).filter(Boolean);
+      const responses = [];
+      for (let i = 0; i < ids.length; i += 100) {
+        const page = await History.getJson(`${base}/load-responses`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ responseIds: ids.slice(i, i + 100) }),
+        });
+        responses.push(...(page.responses || []));
+      }
+      const order = new Map(ids.map((rid, i) => [rid, i]));
+      responses.sort((a, b) => (order.get(idOf(a)) ?? 0) - (order.get(idOf(b)) ?? 0));
+      const items = responses
+        .map((r) => ({
+          role: /user|human/i.test(r.sender || r.role || "") ? "user" : "ai",
+          kind: "message",
+          text: String(r.message ?? r.content ?? r.text ?? ""),
+        }))
+        .filter((i) => i.text.trim());
+      return { items, uncounted: 0 };
+    },
+  });
+
+  /* ---- Gemini: batchexecute rpc hNvQHb (the call the app uses to open a
+   * chat). The at / f.sid tokens come from the page's WIZ_global_data. */
+  Object.assign(Platforms.registry.gemini, {
+    conversationId() {
+      const m = location.pathname.match(/\/app\/([a-z0-9_-]+)/i);
+      return m ? m[1].replace(/^c_/, "") : "";
+    },
+
+    wizValue(key) {
+      const re = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`);
+      for (const script of document.scripts) {
+        const m = script.textContent.match(re);
+        if (m) return m[1];
+      }
+      return "";
+    },
+
+    async fetchHistory(id) {
+      const self = Platforms.registry.gemini;
+      const at = self.wizValue("SNlM0e");
+      if (!at) throw new Error("session token not found on the page");
+      const prefix = (location.pathname.match(/^\/u\/\d+/) || [""])[0];
+      const params = new URLSearchParams({
+        rpcids: "hNvQHb",
+        "source-path": location.pathname,
+        "f.sid": self.wizValue("FdrFJe"),
+        _reqid: String(Math.floor(Math.random() * 100000)),
+        rt: "c",
+      });
+      const bl = self.wizValue("cfb2h");
+      if (bl) params.set("bl", bl);
+      const body = new URLSearchParams({
+        "f.req": JSON.stringify([[["hNvQHb", JSON.stringify([`c_${id}`, 1000, null, 1, [1], [4], null, 1]), null, "generic"]]]),
+        at,
+      });
+      const res = await fetch(`${prefix}/_/BardChatUi/data/batchexecute?${params}`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+          "x-same-domain": "1",
+        },
+        body,
+      });
+      if (!res.ok) throw new Error(`batchexecute → HTTP ${res.status}`);
+      let payload = null;
+      for (const line of (await res.text()).split("\n")) {
+        const start = line.indexOf("[[");
+        if (start === -1) continue;
+        try {
+          for (const entry of JSON.parse(line.slice(start)))
+            if (entry?.[0] === "wrb.fr" && entry[1] === "hNvQHb" && typeof entry[2] === "string")
+              payload = JSON.parse(entry[2]);
+        } catch (e) {
+          /* not the JSON line */
+        }
+        if (payload) break;
+      }
+      const turns = payload?.[0];
+      if (!Array.isArray(turns)) throw new Error("unexpected batchexecute reply");
+      const items = [];
+      // Newest first on the wire.
+      [...turns].reverse().forEach((turn) => {
+        const user = turn?.[2]?.[0]?.[0];
+        const reply = turn?.[3]?.[0]?.[0]?.[1]?.[0];
+        if (typeof user === "string" && user.trim()) items.push({ role: "user", kind: "message", text: user });
+        if (typeof reply === "string" && reply.trim()) items.push({ role: "ai", kind: "message", text: reply });
+      });
+      return { items, uncounted: 0 };
+    },
+  });
+
+  /* ==========================================================================
    * 8. PROMPT STORE — the prompt library and its GitHub Gist sync.
    *
    * Local-first: every prompt lives in GM storage and works offline. A single
@@ -1980,6 +2801,945 @@
       el.focus();
       return true;
     },
+
+    isField(el) {
+      return el.tagName === "TEXTAREA" || el.tagName === "INPUT";
+    },
+
+    /**
+     * The composer's current text, or null when there is no composer.
+     * Rich editors keep one block element per line, and innerText pads each
+     * <p> with a blank line, so their children are joined one per line.
+     */
+    getText(el = Composer.find()) {
+      if (!el) return null;
+      if (Composer.isField(el)) return el.value;
+      const blocks = [...el.children];
+      const text = (
+        blocks.length
+          ? blocks.map((b) => b.innerText.replace(/\n$/, "")).join("\n")
+          : el.innerText
+      ).replace(/ /g, " "); // editors keep runs of spaces as &nbsp;
+      return text.trim() ? text : "";
+    },
+
+    /**
+     * Replaces everything in the composer. Goes through the same framework-
+     * visible paths as insert(), with the whole content selected first, so
+     * the site's undo (Ctrl+Z) still brings the old text back.
+     * @returns {boolean} false when no composer could be found.
+     */
+    setText(text) {
+      const el = Composer.find();
+      if (!el) return false;
+      el.focus();
+      if (Composer.isField(el)) {
+        el.setSelectionRange?.(0, el.value.length);
+        Composer.insertIntoTextarea(el, text);
+        return true;
+      }
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      if (text) {
+        Composer.insertIntoEditable(el, text);
+      } else {
+        document.execCommand("delete");
+        el.dispatchEvent(
+          new InputEvent("input", { bubbles: true, inputType: "deleteContent" }),
+        );
+      }
+      return true;
+    },
+
+    /**
+     * Attaches files to the message being written: first as a paste (which
+     * every one of these sites accepts for images), then through the
+     * composer's own file <input> if nobody handled the paste.
+     * @returns {boolean} whether some handler took the files.
+     */
+    attachFiles(files) {
+      const el = Composer.find();
+      if (!el || !files.length) return false;
+      const transfer = () => {
+        const data = new DataTransfer();
+        files.forEach((f) => data.items.add(f));
+        return data;
+      };
+      el.focus();
+      try {
+        const paste = new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: transfer(),
+        });
+        el.dispatchEvent(paste);
+        if (paste.defaultPrevented) return true;
+      } catch (e) {
+        /* no ClipboardEvent constructor — try the file input */
+      }
+      const frame = Composer.frameOf(el);
+      const input =
+        frame.querySelector("input[type='file']") ||
+        el.closest("form")?.querySelector("input[type='file']") ||
+        document.querySelector("input[type='file']");
+      if (!input) return false;
+      input.files = transfer().files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    },
+  };
+
+  /* ==========================================================================
+   * 9b. TOKENIZERS — the real token count for each site, not a guess.
+   *
+   * No chat site reports context usage to its own web page (claude.ai even
+   * strips `usage` from its stream), so the count has to be made here, and
+   * each site gets the most exact method that exists for its models:
+   *
+   *   ChatGPT, Copilot  o200k_base, OpenAI's published BPE for GPT-4o/4.1/5
+   *                     and the o-series (tiktoken/model.py). Runs locally
+   *                     and is exact; the ranks file is fetched once.
+   *   Claude            Anthropic's POST /v1/messages/count_tokens. There is
+   *                     no public tokenizer for current Claude models, and
+   *                     OpenAI's undercounts Claude by 15-20%.
+   *   Gemini            Google's models/{model}:countTokens. No local one.
+   *   Grok              xAI's POST /v1/tokenize-text.
+   *
+   * The three APIs need the user's own key and are free to call. Without a
+   * key those sites fall back to an estimate, and the meter says so.
+   * ========================================================================== */
+  const Tokenizers = {
+    /** Which method each site uses. */
+    METHODS: {
+      chatgpt: { kind: "o200k" },
+      copilot: { kind: "o200k" },
+      claude: { kind: "api", provider: "anthropic" },
+      gemini: { kind: "api", provider: "gemini" },
+      grok: { kind: "api", provider: "xai" },
+    },
+
+    PROVIDERS: {
+      anthropic: {
+        name: "Anthropic count_tokens API",
+        keyLabel: "Anthropic API key (console.anthropic.com)",
+        keyHint: "sk-ant-…",
+        defaultModel: "claude-opus-5",
+      },
+      gemini: {
+        name: "Gemini countTokens API",
+        keyLabel: "Gemini API key (aistudio.google.com)",
+        keyHint: "AIza…",
+        defaultModel: "gemini-3.8-flash",
+      },
+      xai: {
+        name: "xAI tokenize-text API",
+        keyLabel: "xAI API key (console.x.ai)",
+        keyHint: "xai-…",
+        defaultModel: "grok-4.6",
+      },
+    },
+
+    settings() {
+      return Store.get(Config.GM_KEYS.METER_TOKENIZER, {}) || {};
+    },
+
+    /** Saves { key, model } for one provider; empty strings clear them. */
+    configure(provider, { key, model }) {
+      const all = { ...Tokenizers.settings() };
+      all[provider] = { key: (key || "").trim(), model: (model || "").trim() };
+      Store.set(Config.GM_KEYS.METER_TOKENIZER, all);
+    },
+
+    /** @returns {{kind, provider?, key?, model?, label}} the method for a site. */
+    methodFor(platformId, siteModel) {
+      const method = Tokenizers.METHODS[platformId] || { kind: "estimate" };
+      if (method.kind === "o200k")
+        return { ...method, label: "o200k_base — OpenAI tokenizer, exact" };
+      if (method.kind !== "api") return { kind: "estimate", label: "estimate (~4 chars/token)" };
+      const provider = Tokenizers.PROVIDERS[method.provider];
+      const saved = Tokenizers.settings()[method.provider] || {};
+      return {
+        ...method,
+        key: saved.key || "",
+        // A model the user typed wins, then the one the chat says it uses.
+        model: saved.model || siteModel || provider.defaultModel,
+        label: saved.key
+          ? `${provider.name}, exact`
+          : `estimate — add a key below for ${provider.name}`,
+      };
+    },
+
+    /* ---------------- o200k_base, local BPE ----------------
+     * A port of tiktoken's encoder that only counts. Checked token-for-token
+     * against js-tiktoken on code, prose, CJK, emoji and long runs. */
+    o200k: {
+      _ranks: null,
+      _pattern: null,
+      _loading: null,
+      _cache: new Map(),
+      _encoder: new TextEncoder(),
+
+      ready() {
+        return !!Tokenizers.o200k._ranks;
+      },
+
+      /** Loads the ranks once per page; the file itself is cached in storage. */
+      load() {
+        const t = Tokenizers.o200k;
+        if (t._ranks) return Promise.resolve();
+        if (!t._loading)
+          t._loading = t._load().catch((e) => {
+            t._loading = null;
+            throw e;
+          });
+        return t._loading;
+      },
+
+      async _load() {
+        const t = Tokenizers.o200k;
+        let source = Store.get(Config.GM_KEYS.O200K_CACHE, "");
+        const fresh = !source;
+        if (fresh) {
+          const res = await Net.request({ url: Config.METER.O200K_URL });
+          if (res.status !== 200) throw new Error(`HTTP ${res.status} loading o200k_base`);
+          source = res.text;
+        }
+        // js-tiktoken's ranks module: `export default {pat_str, bpe_ranks, …}`.
+        let data;
+        try {
+          data = JSON.parse(source.slice(source.indexOf("{"), source.lastIndexOf("}") + 1));
+        } catch (e) {
+          Store.set(Config.GM_KEYS.O200K_CACHE, "");
+          throw new Error("o200k_base ranks file is corrupt");
+        }
+        // Each line: "<first token> <offset> <b64 token> <b64 token> …"; the
+        // i-th token on a line has rank offset + i. Keys are byte strings.
+        const ranks = new Map();
+        for (const line of data.bpe_ranks.split("\n")) {
+          if (!line) continue;
+          const [, offset, ...tokens] = line.split(" ");
+          const base = Number(offset);
+          tokens.forEach((token, i) => ranks.set(atob(token), base + i));
+        }
+        if (ranks.size < 199000) throw new Error("o200k_base ranks file is incomplete");
+        t._pattern = new RegExp(data.pat_str, "gu");
+        t._ranks = ranks;
+        if (fresh) {
+          try {
+            Store.set(Config.GM_KEYS.O200K_CACHE, source);
+          } catch (e) {
+            /* storage full (bookmarklet localStorage) — refetch next time */
+          }
+        }
+      },
+
+      count(text) {
+        const t = Tokenizers.o200k;
+        if (!text) return 0;
+        const hit = t._cache.get(text);
+        if (hit !== undefined) return hit;
+        let n = 0;
+        for (const match of text.matchAll(t._pattern)) {
+          const bytes = t._encoder.encode(match[0]);
+          let bin = "";
+          for (let s = 0; s < bytes.length; s += 8192)
+            bin += String.fromCharCode.apply(null, bytes.subarray(s, s + 8192));
+          if (t._ranks.has(bin)) n++;
+          else n += bin.length > 64 ? t.mergeCountLarge(bin) : t.mergeCount(bin);
+        }
+        if (t._cache.size > 4000) t._cache.clear();
+        t._cache.set(text, n);
+        return n;
+      },
+
+      /**
+       * tiktoken's _byte_pair_merge: keep merging the adjacent pair whose
+       * bytes have the lowest rank (leftmost on ties) until none is a token.
+       * @returns {number} how many tokens the piece becomes.
+       */
+      mergeCount(bin) {
+        const ranks = Tokenizers.o200k._ranks;
+        if (bin.length === 1) return 1;
+        const starts = [];
+        for (let i = 0; i <= bin.length; i++) starts.push(i);
+        const rankAt = (i) =>
+          i + 2 < starts.length
+            ? ranks.get(bin.slice(starts[i], starts[i + 2])) ?? Infinity
+            : Infinity;
+        const r = [];
+        for (let i = 0; i < starts.length - 1; i++) r.push(rankAt(i));
+        for (;;) {
+          let min = Infinity;
+          let idx = -1;
+          for (let i = 0; i < r.length; i++)
+            if (r[i] < min) {
+              min = r[i];
+              idx = i;
+            }
+          if (idx < 0) break;
+          starts.splice(idx + 1, 1);
+          r.splice(idx + 1, 1);
+          r[idx] = rankAt(idx);
+          if (idx > 0) r[idx - 1] = rankAt(idx - 1);
+        }
+        return starts.length - 1;
+      },
+
+      /** The same merge in O(n log n), for long pieces (runs of spaces, base64). */
+      mergeCountLarge(bin) {
+        const ranks = Tokenizers.o200k._ranks;
+        const n = bin.length;
+        const next = new Int32Array(n + 1);
+        const prev = new Int32Array(n + 1);
+        const version = new Int32Array(n + 1);
+        for (let i = 0; i <= n; i++) {
+          next[i] = i + 1;
+          prev[i] = i - 1;
+        }
+        const heap = []; // [rank, position, version]
+        const less = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
+        const swap = (i, j) => ([heap[i], heap[j]] = [heap[j], heap[i]]);
+        const push = (entry) => {
+          heap.push(entry);
+          for (let i = heap.length - 1; i > 0; ) {
+            const p = (i - 1) >> 1;
+            if (!less(heap[i], heap[p])) break;
+            swap(i, p);
+            i = p;
+          }
+        };
+        const pop = () => {
+          const top = heap[0];
+          const last = heap.pop();
+          if (heap.length) {
+            heap[0] = last;
+            for (let i = 0; ; ) {
+              const l = 2 * i + 1;
+              let m = i;
+              if (l < heap.length && less(heap[l], heap[m])) m = l;
+              if (l + 1 < heap.length && less(heap[l + 1], heap[m])) m = l + 1;
+              if (m === i) break;
+              swap(i, m);
+              i = m;
+            }
+          }
+          return top;
+        };
+        // Re-rank the pair that starts at part i; older heap entries go stale.
+        const rerank = (i) => {
+          version[i]++;
+          if (i < 0 || i >= n || next[i] >= n) return;
+          const rank = ranks.get(bin.slice(i, next[next[i]]));
+          if (rank !== undefined) push([rank, i, version[i]]);
+        };
+        for (let i = 0; i < n - 1; i++) rerank(i);
+        let parts = n;
+        while (heap.length) {
+          const [, i, v] = pop();
+          if (v !== version[i]) continue;
+          const j = next[i];
+          next[i] = next[j];
+          if (next[j] <= n) prev[next[j]] = i;
+          version[j]++;
+          parts--;
+          rerank(i);
+          if (prev[i] >= 0) rerank(prev[i]);
+        }
+        return parts;
+      },
+    },
+
+    /* ---------------- provider APIs ---------------- */
+
+    /** Collapses items into alternating user/assistant turns, as chat APIs expect. */
+    toTurns(items) {
+      const turns = [];
+      items.forEach((item) => {
+        const role = item.role === "user" ? "user" : "assistant";
+        const last = turns[turns.length - 1];
+        if (last && last.role === role) last.text += `\n\n${item.text}`;
+        else turns.push({ role, text: item.text });
+      });
+      // Must open with the user, and a trailing assistant turn would be read
+      // as a prefill; a one-character user turn fixes both for ~1 token.
+      if (!turns.length || turns[0].role !== "user") turns.unshift({ role: "user", text: "." });
+      if (turns[turns.length - 1].role !== "user") turns.push({ role: "user", text: "." });
+      return turns;
+    },
+
+    api: {
+      async anthropic(items, model, key) {
+        const res = await Net.json({
+          method: "POST",
+          url: "https://api.anthropic.com/v1/messages/count_tokens",
+          headers: {
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+            // Only matters on the fetch() fallback; GM requests have no CORS.
+            "anthropic-dangerous-direct-browser-access": "true",
+          },
+          body: JSON.stringify({
+            model,
+            messages: Tokenizers.toTurns(items).map((t) => ({ role: t.role, content: t.text })),
+          }),
+        });
+        return res.input_tokens;
+      },
+
+      async gemini(items, model, key) {
+        const res = await Net.json({
+          method: "POST",
+          url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:countTokens`,
+          headers: { "x-goog-api-key": key, "content-type": "application/json" },
+          body: JSON.stringify({
+            contents: Tokenizers.toTurns(items).map((t) => ({
+              role: t.role === "user" ? "user" : "model",
+              parts: [{ text: t.text }],
+            })),
+          }),
+        });
+        return res.totalTokens;
+      },
+
+      async xai(items, model, key) {
+        const res = await Net.json({
+          method: "POST",
+          url: "https://api.x.ai/v1/tokenize-text",
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify({ model, text: items.map((i) => i.text).join("\n\n") }),
+        });
+        return res.token_ids.length;
+      },
+    },
+
+    _apiCache: new Map(),
+
+    /**
+     * Counts every item. o200k and the estimate are per item; an API returns
+     * one exact total, which is then shared out over the items in proportion
+     * to their estimates (so the breakdown is approximate, the total is not).
+     * @returns {Promise<{per:number[], total:number, exact:boolean,
+     *   perExact:boolean, label:string, error:string}>}
+     */
+    async countItems(items, method) {
+      const estimates = items.map((i) => Utils.estimateTokens(i.text) + Config.METER.TURN_OVERHEAD);
+      const estTotal = estimates.reduce((a, b) => a + b, 0);
+      const estimate = (label, error = "") => ({
+        per: estimates, total: estTotal, exact: false, perExact: false, label, error,
+      });
+
+      if (method.kind === "o200k") {
+        try {
+          await Tokenizers.o200k.load();
+        } catch (e) {
+          return estimate("estimate (~4 chars/token)", `o200k_base could not load — ${e.message}`);
+        }
+        const per = items.map((i) => Tokenizers.o200k.count(i.text) + Config.METER.TURN_OVERHEAD);
+        return {
+          per, total: per.reduce((a, b) => a + b, 0), exact: true, perExact: true,
+          label: method.label, error: "",
+        };
+      }
+
+      if (method.kind !== "api" || !method.key || !items.length) return estimate(method.label);
+
+      // One request per distinct transcript: nothing is resent until it changes.
+      const cacheKey = `${method.provider}|${method.model}|${Utils.hash(items.map((i) => `${i.role}:${i.text}`).join(""))}`;
+      let total = Tokenizers._apiCache.get(cacheKey);
+      if (total === undefined) {
+        try {
+          total = await Tokenizers.api[method.provider](items, method.model, method.key);
+        } catch (e) {
+          return estimate("estimate (~4 chars/token)", `${Tokenizers.PROVIDERS[method.provider].name} failed — ${e.message}`);
+        }
+        if (Tokenizers._apiCache.size > 50) Tokenizers._apiCache.clear();
+        Tokenizers._apiCache.set(cacheKey, total);
+      }
+      const scale = estTotal ? total / estTotal : 1;
+      return {
+        per: estimates.map((n) => n * scale), total, exact: true, perExact: false,
+        label: method.label, error: "",
+      };
+    },
+  };
+
+  /* ==========================================================================
+   * 9c. METER — how full the conversation is, as a traffic light.
+   *
+   * Counts the whole conversation from its first turn, not just what is on
+   * screen: every site lazy-loads or virtualises long chats, so the history is
+   * read from the site's own backend (Platform.fetchHistory) and the page is
+   * only the fallback. Green: keep going. Yellow: the chat is getting long, be
+   * ready to move. Red: start a new chat now.
+   * ========================================================================== */
+  const Meter = {
+    _result: null, // the last full count; see recount()
+    _composerTokens: 0,
+    _ratio: 1, // exact / estimate from the last API count, for unsent text
+    _timer: null,
+    _running: false,
+    _dirty: false,
+    _lastFetchAt: 0,
+    _lastConvId: null,
+    _usage: null, // the site's own plan-usage numbers, where it has them
+    // Keyed, so a rebuilt panel or dock replaces its listener instead of
+    // stacking another one onto detached nodes.
+    _listeners: new Map(),
+
+    LEVELS: {
+      ok: {
+        title: "Continue chat",
+        detail: "Plenty of room left in this conversation.",
+      },
+      warn: {
+        title: "Get ready to switch",
+        detail:
+          "The chat is getting long. Finish the current thread of work and " +
+          "have a handoff summary ready.",
+      },
+      crit: {
+        title: "Switch now",
+        detail:
+          "Answers get slower, forgetful and less accurate from here. Ask for " +
+          "a handoff summary and continue in a new chat.",
+      },
+    },
+
+    budget() {
+      const id = UI._platform?.id;
+      const saved = Store.get(Config.GM_KEYS.METER_BUDGETS, {}) || {};
+      return (
+        Number(saved[id]) ||
+        Config.METER.DEFAULT_BUDGETS[id] ||
+        Config.METER.FALLBACK_BUDGET
+      );
+    },
+
+    /** Saves a budget for the current site; a falsy value restores the default. */
+    setBudget(tokens) {
+      const id = UI._platform?.id;
+      if (!id) return;
+      const saved = { ...(Store.get(Config.GM_KEYS.METER_BUDGETS, {}) || {}) };
+      if (tokens > 0) saved[id] = Math.round(tokens);
+      else delete saved[id];
+      Store.set(Config.GM_KEYS.METER_BUDGETS, saved);
+      Meter.notify();
+    },
+
+    thresholds() {
+      const warn = Number(Store.get(Config.GM_KEYS.METER_WARN_PCT, Config.METER.WARN_PCT));
+      const crit = Number(Store.get(Config.GM_KEYS.METER_CRIT_PCT, Config.METER.CRIT_PCT));
+      return {
+        warn: warn > 0 ? warn : Config.METER.WARN_PCT,
+        crit: crit > 0 ? crit : Config.METER.CRIT_PCT,
+      };
+    },
+
+    setThresholds(warn, crit) {
+      Store.set(Config.GM_KEYS.METER_WARN_PCT, warn);
+      Store.set(Config.GM_KEYS.METER_CRIT_PCT, crit);
+      Meter.notify();
+    },
+
+    /** Turns the page's extracted messages into countable items. */
+    pageItems(chatData) {
+      return (chatData?.messages || [])
+        .filter((m) => m.contentText)
+        .map((m) => ({
+          role: m.author === "user" ? "user" : "ai",
+          kind: "message",
+          text: m.contentText,
+        }));
+    },
+
+    /**
+     * Called whenever the page's chat changes. Opening another chat clears
+     * the old count and shows a quick page-only one straight away; the full
+     * count follows once the history has been fetched.
+     */
+    setChat(chatData) {
+      const convId = UI._platform?.conversationId?.() || "";
+      if (convId !== Meter._lastConvId) {
+        Meter._lastConvId = convId;
+        Meter._lastFetchAt = 0;
+        Meter._result = null;
+      }
+      if (!Meter._result) {
+        const items = Meter.pageItems(chatData);
+        const per = items.map((i) => Utils.estimateTokens(i.text) + Config.METER.TURN_OVERHEAD);
+        Meter._result = Meter.summarize(items, {
+          per, total: per.reduce((a, b) => a + b, 0), exact: false, perExact: false,
+          label: "estimate — counting…", error: "",
+        }, { source: "page", pending: true });
+        Meter.notify();
+      }
+      Meter.schedule();
+    },
+
+    /**
+     * Debounced: streaming replies change the page many times a second. The
+     * history is refetched at most once per HISTORY_MIN_INTERVAL_MS, but a
+     * final recount always lands a few seconds after the page goes quiet.
+     */
+    schedule(now = false) {
+      clearTimeout(Meter._timer);
+      const sinceFetch = Date.now() - Meter._lastFetchAt;
+      const delay = now
+        ? 0
+        : Math.max(Config.METER.RECOUNT_DEBOUNCE_MS, Config.METER.HISTORY_MIN_INTERVAL_MS - sinceFetch);
+      Meter._timer = setTimeout(() => Meter.recount(), delay);
+    },
+
+    async recount() {
+      if (Meter._running) {
+        Meter._dirty = true;
+        return;
+      }
+      Meter._running = true;
+      try {
+        const platform = UI._platform;
+        const convId = platform?.conversationId?.() || "";
+        let items = null;
+        let history = null;
+        let historyError = "";
+        if (convId && typeof platform.fetchHistory === "function") {
+          Meter._lastFetchAt = Date.now();
+          try {
+            history = await platform.fetchHistory(convId);
+            items = history.items;
+          } catch (e) {
+            historyError = e.message;
+          }
+          if (convId !== (platform.conversationId?.() || "")) return; // navigated away
+        }
+        const source = items && items.length ? "history" : "page";
+        if (source === "page") items = Meter.pageItems(ChatExporter._currentChatData);
+
+        const method = Tokenizers.methodFor(platform?.id, history?.model);
+        const counted = await Tokenizers.countItems(items, method);
+        const estTotal = items.reduce((s, i) => s + Utils.estimateTokens(i.text) + Config.METER.TURN_OVERHEAD, 0);
+        if (counted.exact && estTotal) Meter._ratio = counted.total / estTotal;
+        Meter._result = Meter.summarize(items, counted, {
+          source,
+          historyError,
+          model: history?.model || "",
+          uncounted: history?.uncounted || 0,
+        });
+        Meter.tick(true);
+        Meter.notify();
+        Meter.refreshUsage();
+      } catch (e) {
+        console.error("AiUtil meter recount failed", e);
+      } finally {
+        Meter._running = false;
+        if (Meter._dirty) {
+          Meter._dirty = false;
+          Meter.schedule();
+        }
+      }
+    },
+
+    /** Folds per-item counts into the numbers the meter shows. */
+    summarize(items, counted, extra) {
+      const r = {
+        tokens: counted.total, userTokens: 0, aiTokens: 0, contextTokens: 0,
+        turns: 0, messages: 0, largest: 0,
+        method: counted.label, exact: counted.exact, perExact: counted.perExact,
+        error: counted.error, source: "page", historyError: "", model: "",
+        uncounted: 0, pending: false, ...extra,
+      };
+      items.forEach((item, i) => {
+        const n = Math.round(counted.per[i]);
+        if (item.kind !== "message") r.contextTokens += n;
+        else if (item.role === "user") {
+          r.userTokens += n;
+          r.turns++;
+        } else r.aiTokens += n;
+        if (item.kind === "message") r.messages++;
+        r.largest = Math.max(r.largest, n);
+      });
+      return r;
+    },
+
+    /**
+     * Re-reads the unsent composer text. Cheap; called on the Quick Dock poll.
+     * Exact under o200k; elsewhere the estimate is scaled by the last exact
+     * count so it lands in the same units without an API call per keystroke.
+     */
+    tick(silent = false) {
+      const text = Composer.getText() || "";
+      const method = Tokenizers.METHODS[UI._platform?.id]?.kind;
+      const tokens =
+        method === "o200k" && Tokenizers.o200k.ready()
+          ? Tokenizers.o200k.count(text)
+          : Math.round(Utils.estimateTokens(text) * Meter._ratio);
+      if (tokens === Meter._composerTokens) return;
+      Meter._composerTokens = tokens;
+      if (!silent) Meter.notify();
+    },
+
+    /** The site's own quota numbers (claude.ai only). Never fails loudly. */
+    async refreshUsage() {
+      const platform = UI._platform;
+      if (typeof platform?.fetchUsage !== "function") return;
+      if (Meter._usage && Date.now() - Meter._usage.at < Config.METER.USAGE_REFRESH_MS) return;
+      try {
+        Meter._usage = { at: Date.now(), limits: await platform.fetchUsage() };
+      } catch (e) {
+        Meter._usage = { at: Date.now(), limits: [], error: e.message };
+      }
+      Meter.notify();
+    },
+
+    snapshot() {
+      const chat = Meter._result || Meter.summarize([], {
+        per: [], total: 0, exact: false, perExact: false, label: "", error: "",
+      }, { pending: true });
+      const budget = Meter.budget();
+      const { warn, crit } = Meter.thresholds();
+      const total = chat.tokens + Meter._composerTokens;
+      const pct = (total / budget) * 100;
+      const level = pct >= crit ? "crit" : pct >= warn ? "warn" : "ok";
+      const perTurn = chat.turns ? chat.tokens / chat.turns : 0;
+      const toRed = (budget * crit) / 100 - total;
+      return {
+        ...chat,
+        composerTokens: Meter._composerTokens,
+        total,
+        budget,
+        pct,
+        warn,
+        crit,
+        level,
+        perTurn,
+        usage: Meter._usage,
+        // Only meaningful once there is a turn to average over.
+        turnsLeft: perTurn && toRed > 0 ? Math.floor(toRed / perTurn) : null,
+      };
+    },
+
+    subscribe(key, fn) {
+      Meter._listeners.set(key, fn);
+      fn(Meter.snapshot());
+    },
+
+    notify() {
+      const snap = Meter.snapshot();
+      Meter._listeners.forEach((fn) => {
+        try {
+          fn(snap);
+        } catch (e) {
+          console.error("AiUtil meter listener failed", e);
+        }
+      });
+    },
+  };
+
+  /* ==========================================================================
+   * 9d. HANDOFF — "new chat with this chat as context".
+   *
+   * Reads the whole conversation (the same full history the meter uses),
+   * packs it in the format chosen in the Floating Dock — plain transcript,
+   * TOON, minified text or Snapcompact images — and opens the site's new-chat
+   * page with it already in the input box. Nothing is sent: you read it,
+   * add your next message and press send yourself.
+   *
+   * The page load in between wipes this script, so the package travels
+   * through GM storage, tagged with an id in the new URL's hash; the fresh
+   * page picks it up in consumePending().
+   * ========================================================================== */
+  const Handoff = {
+    FORMATS: {
+      transcript: { name: "Transcript", detail: "Plain User / Assistant text" },
+      toon: { name: "TOON", detail: "Compact structured text, fewest tokens for long chats" },
+      minify: { name: "Minified", detail: "Transcript with all whitespace collapsed" },
+      snapcompact: { name: "Snapcompact", detail: "Dense images, attached to the message" },
+    },
+
+    // Captured before the site's router can rewrite the URL.
+    _hashAtLoad: location.hash,
+
+    settings() {
+      return { ...Config.HANDOFF.DEFAULTS, ...(Store.get(Config.GM_KEYS.HANDOFF_SETTINGS, {}) || {}) };
+    },
+
+    save(patch) {
+      Store.set(Config.GM_KEYS.HANDOFF_SETTINGS, { ...Handoff.settings(), ...patch });
+    },
+
+    /** The full conversation, or what the page shows when that fails. */
+    async collect() {
+      const platform = UI._platform;
+      const convId = platform?.conversationId?.() || "";
+      if (convId && typeof platform.fetchHistory === "function") {
+        try {
+          const history = await platform.fetchHistory(convId);
+          if (history.items.length) return { items: history.items, source: "history" };
+        } catch (e) {
+          /* fall through to the page */
+        }
+      }
+      return { items: Meter.pageItems(ChatExporter._currentChatData), source: "page" };
+    },
+
+    /** Items the chosen options keep, each with a readable speaker label. */
+    select(items, opts) {
+      const labels = { attachment: "Attached file", tool: "Tool", instructions: null, memory: null };
+      return items
+        .filter((i) => {
+          if (i.kind === "message") return true;
+          if (i.kind === "attachment") return opts.attachments;
+          if (i.kind === "tool") return opts.tools;
+          return false; // instructions and memory apply in the new chat anyway
+        })
+        .map((i) => ({
+          ...i,
+          speaker: i.kind === "message" ? (i.role === "user" ? "User" : "Assistant") : labels[i.kind],
+        }));
+    },
+
+    /**
+     * @returns {Promise<{text:string, files:File[], tokens:number, note:string}>}
+     *   the message to prefill, plus images for the Snapcompact format.
+     */
+    async build(opts) {
+      const { items, source } = await Handoff.collect();
+      const picked = Handoff.select(items, opts);
+      if (!picked.length) throw new Error("There is no conversation here to carry over yet.");
+      const title = ChatExporter._currentChatData?.title || document.title || "chat";
+      const transcript = picked.map((i) => `${i.speaker}: ${i.text.trim()}`).join("\n\n");
+      const wrap = (body) =>
+        `${opts.preamble.trim()}\n\n<previous_conversation title="${title.replace(/"/g, "'")}">\n${body}\n</previous_conversation>`;
+      const note = source === "history" ? "whole conversation" : "visible page only (history unavailable)";
+
+      if (opts.format === "snapcompact") {
+        const text = Snapcompact.serialize(
+          picked.map((i) => ({
+            author: i.role === "user" ? "user" : "ai",
+            contentText: i.kind === "message" ? i.text : `[${i.speaker}] ${i.text}`,
+          })),
+        );
+        const pages = Snapcompact.renderPages(text, { fontSizePx: 10 });
+        const blobs = await Promise.all(
+          pages.map((p) => new Promise((res) => p.canvas.toBlob(res, "image/png"))),
+        );
+        const files = blobs.map(
+          (b, i) => new File([b], `previous-chat-${i + 1}.png`, { type: "image/png" }),
+        );
+        const tokens = pages.reduce((sum, p) => sum + Snapcompact.estimateTokens(p.canvas), 0);
+        const preamble =
+          `${opts.preamble.trim()}\n\nThe attached image${files.length > 1 ? "s contain" : " contains"} ` +
+          `our previous conversation ("${title}"), one line per message: "U:" is me, "A:" is you.`;
+        return { text: preamble, files, tokens, note };
+      }
+
+      let body = transcript;
+      if (opts.format === "toon") {
+        body = Lib.jsonToToon({
+          title,
+          platform: UI._platform?.id || "",
+          messages: picked.map((i) => ({ from: i.speaker, text: i.text.trim() })),
+        }).replace(/^ /gm, "");
+      } else if (opts.format === "minify") {
+        body = transcript.replace(/\s+/g, " ").trim();
+      }
+      const text = wrap(body);
+      const method = Tokenizers.METHODS[UI._platform?.id]?.kind;
+      const tokens =
+        method === "o200k" && Tokenizers.o200k.ready()
+          ? Tokenizers.o200k.count(text)
+          : Math.round(Utils.estimateTokens(text) * Meter._ratio);
+      return { text, files: [], tokens, note };
+    },
+
+    /**
+     * Builds the package and opens the new chat. A new tab is opened before
+     * the first await, while the click still counts as a user gesture, or
+     * the browser's popup blocker would stop it.
+     */
+    async start(report = () => {}) {
+      const platform = UI._platform;
+      if (!platform) return;
+      const opts = Handoff.settings();
+      const tab = opts.newTab ? window.open("", "_blank") : null;
+      report("Reading the whole conversation…");
+      try {
+        const pkg = await Handoff.build(opts);
+        const id = Math.random().toString(36).slice(2, 10);
+        const images = await Promise.all(
+          pkg.files.map(
+            (f) =>
+              new Promise((res, rej) => {
+                const reader = new FileReader();
+                reader.onload = () => res(reader.result);
+                reader.onerror = () => rej(reader.error);
+                reader.readAsDataURL(f);
+              }),
+          ),
+        );
+        Store.set(Config.GM_KEYS.HANDOFF_PENDING, {
+          id,
+          platform: platform.id,
+          createdAt: Date.now(),
+          text: pkg.text,
+          images,
+        });
+        const url = `${platform.newChatUrl}#aiutil-handoff=${id}`;
+        report(
+          `Opening a new chat — ${Handoff.FORMATS[opts.format].name}, ` +
+            `~${Utils.formatTokens(pkg.tokens)} tokens, ${pkg.note}.`,
+        );
+        if (tab) tab.location.href = url;
+        else window.location.href = url;
+      } catch (e) {
+        if (tab) tab.close();
+        report(e.message);
+      }
+    },
+
+    /**
+     * On a freshly opened page: if a handoff is waiting for this site (and
+     * this is the tab it was meant for), fill the new chat's input box.
+     */
+    async consumePending() {
+      const pending = Store.get(Config.GM_KEYS.HANDOFF_PENDING, null);
+      if (!pending || pending.platform !== UI._platform?.id) return;
+      if (Date.now() - pending.createdAt > Config.HANDOFF.TTL_MS) {
+        Store.set(Config.GM_KEYS.HANDOFF_PENDING, null);
+        return;
+      }
+      const tagged = Handoff._hashAtLoad.includes(`aiutil-handoff=${pending.id}`) ||
+        location.hash.includes(`aiutil-handoff=${pending.id}`);
+      if (!tagged) return;
+      Store.set(Config.GM_KEYS.HANDOFF_PENDING, null);
+      if (location.hash.includes("aiutil-handoff="))
+        history.replaceState(history.state, "", location.pathname + location.search);
+
+      const deadline = Date.now() + Config.HANDOFF.COMPOSER_WAIT_MS;
+      while (!Composer.find() && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 400));
+      if (!Composer.find()) return;
+      // Let the editor finish mounting before writing into it.
+      await new Promise((r) => setTimeout(r, 600));
+      Composer.setText(pending.text);
+      if (pending.images?.length) {
+        // Decoded by hand: fetch() on a data: URL can trip a site's connect-src CSP.
+        const files = pending.images.map((dataUrl, i) => {
+          const bin = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+          const bytes = new Uint8Array(bin.length);
+          for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+          return new File([bytes], `previous-chat-${i + 1}.png`, { type: "image/png" });
+        });
+        if (!Composer.attachFiles(files))
+          QuickDock.flash("Couldn't attach the chat images — use Snapcompact in the old tab");
+      }
+      QuickDock.flash("Previous chat loaded as context — add your message and send");
+      Meter.tick();
+    },
   };
 
   /* ==========================================================================
@@ -2384,84 +4144,121 @@
 
       const dots = document.createElement("div");
       dots.id = "ai-exporter-rail-drag";
-      dots.textContent = "::";
+      dots.title = "Drag to move";
+      dots.appendChild(Icons.make("grip", 16));
       rail.appendChild(dots);
 
       rail.appendChild(
         UI.makeRailButton({
           id: "prompts",
-          label: "PL",
-          tooltip: "Prompt Library — save prompts and insert them (ALT+P)",
+          icon: "library",
+          tooltip: { title: "Prompt Library", desc: "Save prompts and insert them into the chat.", keys: ["Alt", "P"] },
           onClick: () => UI.showSection("prompts"),
         }),
       );
       rail.appendChild(
         UI.makeRailButton({
           id: "export-md",
-          label: "MD",
-          tooltip: `AI Chat Exporter v${Config.VERSION}: Export to Markdown (ALT+M)`,
+          icon: "markdown",
+          tooltip: { title: "Export to Markdown", desc: "Pick turns and download a .md file.", keys: ["Alt", "M"] },
           onClick: () => UI.showSection("export-md"),
         }),
       );
       rail.appendChild(
         UI.makeRailButton({
           id: "export-json",
-          label: "JD",
-          tooltip: `AI Chat Exporter v${Config.VERSION}: Export to JSON (ALT+J)`,
+          icon: "json",
+          tooltip: { title: "Export to JSON", desc: "Pick turns and download a .json file.", keys: ["Alt", "J"] },
           onClick: () => UI.showSection("export-json"),
         }),
       );
       rail.appendChild(
         UI.makeRailButton({
           id: "settings",
-          label: "URL",
-          tooltip: "Configure output filename format",
+          icon: "sliders",
+          tooltip: { title: "Filename format", desc: "How exported files are named." },
           onClick: () => UI.showSection("settings"),
         }),
       );
       rail.appendChild(
         UI.makeRailButton({
           id: "toon",
-          label: "JT",
-          tooltip: "JSON → TOON converter",
+          icon: "toon",
+          tooltip: { title: "JSON → TOON", desc: "Turn JSON or the chat into compact, token-saving TOON." },
           onClick: () => UI.showSection("toon"),
         }),
       );
       rail.appendChild(
         UI.makeRailButton({
           id: "minifier",
-          label: "TM",
-          tooltip: "Text Minifier",
+          icon: "minify",
+          tooltip: { title: "Text Minifier", desc: "Collapse whitespace to save tokens." },
           onClick: () => UI.showSection("minifier"),
         }),
       );
       rail.appendChild(
         UI.makeRailButton({
           id: "snapcompact",
-          label: "IC",
-          tooltip: "Snapcompact — Render compact image",
+          icon: "image",
+          tooltip: { title: "Snapcompact", desc: "Render text as dense images." },
           onClick: () => UI.showSection("snapcompact"),
         }),
       );
 
       const quickBtn = UI.makeRailButton({
         id: "quickdock",
-        label: UI.quickDockEnabled ? "QD" : "qd",
-        tooltip: "Quick Dock over the chat input box — toggle (ALT+Q)",
+        icon: "quick",
+        tooltip: { title: "Quick Dock", desc: "Show or hide the tool strip over the input box.", keys: ["Alt", "Q"] },
         onClick: () => UI.toggleQuickDock(),
       });
       quickBtn.id = "ai-exporter-rail-quickdock";
+      quickBtn.classList.toggle("off", !UI.quickDockEnabled);
       rail.appendChild(quickBtn);
+
+      const meterBtn = UI.makeRailButton({
+        id: "meter",
+        icon: "gauge",
+        tooltip: { title: "Context meter", tag: true, desc: "When to start a new chat." },
+        onClick: () => UI.showSection("meter"),
+      });
+      const badge = document.createElement("span");
+      badge.className = "ai-exporter-rail-badge";
+      meterBtn.appendChild(badge);
+      const meterTip = meterBtn.querySelector(".ai-exporter-tooltip");
+      Meter.subscribe("rail", (m) => {
+        badge.dataset.level = m.level;
+        UI.fillTooltip(meterTip, {
+          title: "Context meter",
+          tag: true,
+          desc:
+            `${Meter.LEVELS[m.level].title} — ${m.exact ? "" : "~"}${Utils.formatTokens(m.total)} ` +
+            `of ${Utils.formatTokens(m.budget)} tokens.`,
+        });
+      });
+      rail.appendChild(meterBtn);
+
+      rail.appendChild(
+        UI.makeRailButton({
+          id: "handoff",
+          icon: "handoff",
+          tooltip: {
+            title: "New chat with context",
+            tag: true,
+            desc: "Carry this whole chat into a fresh one, as text, TOON or images.",
+          },
+          onClick: () => UI.showSection("handoff"),
+        }),
+      );
 
       if (UI._platform?.hasAutoScroll) {
         const scrollBtn = UI.makeRailButton({
           id: "auto-scroll",
-          emoji: "^",
-          label: UI.autoScrollEnabled ? "ON" : "OFF",
-          tooltip: `Auto-scroll (ALT+A)`,
+          icon: "scrollTop",
+          tooltip: { title: "Auto-scroll", desc: `Load the full history before exporting — ${UI.autoScrollEnabled ? "on" : "off"}.`, keys: ["Alt", "A"] },
           onClick: () => UI.toggleAutoScroll(),
         });
         scrollBtn.id = "ai-exporter-rail-scroll";
+        scrollBtn.classList.toggle("off", !UI.autoScrollEnabled);
         rail.appendChild(scrollBtn);
       }
 
@@ -2471,9 +4268,8 @@
 
       const eyeBtn = UI.makeRailButton({
         id: "master-eye",
-        emoji: "O",
-        label: "",
-        tooltip: "Show / Hide the Floating Dock",
+        icon: "eye",
+        tooltip: { title: "Collapse the dock", desc: "Click the dot to bring it back. Drag to move." },
         onClick: () => UI.toggleGlobalCollapse(),
       });
       eyeBtn.id = "ai-exporter-rail-master-eye";
@@ -2492,7 +4288,7 @@
       const closeBtn = document.createElement("button");
       closeBtn.className = "ai-exporter-icon-btn";
       closeBtn.title = "Close";
-      closeBtn.textContent = "✕";
+      closeBtn.appendChild(Icons.make("close", 14));
       closeBtn.onclick = () => UI.closeSection();
       contentHeader.appendChild(closeBtn);
       content.appendChild(contentHeader);
@@ -2525,10 +4321,15 @@
       return panel;
     },
 
-    makeRailButton({ id, emoji, label, tooltip, onClick }) {
+    makeRailButton({ id, icon, emoji, label, tooltip, onClick }) {
       const btn = document.createElement("div");
       btn.className = "ai-exporter-rail-btn";
       btn.dataset.sectionId = id;
+      if (icon) {
+        const svg = Icons.make(icon);
+        svg.classList.add("rail-icon-svg");
+        btn.appendChild(svg);
+      }
       if (emoji) {
         const e = document.createElement("span");
         e.className = "rail-icon-emoji";
@@ -2544,7 +4345,7 @@
       if (tooltip) {
         const tip = document.createElement("div");
         tip.className = "ai-exporter-tooltip";
-        tip.textContent = tooltip;
+        UI.fillTooltip(tip, typeof tooltip === "string" ? { title: tooltip } : tooltip);
         btn.appendChild(tip);
       }
       if (onClick)
@@ -2553,6 +4354,152 @@
           onClick();
         };
       return btn;
+    },
+
+    /** Puts a native <select> in a wrapper that draws a chevron on its right. */
+    wrapSelect(select) {
+      const box = document.createElement("div");
+      box.className = "ai-exporter-select-wrap";
+      box.append(select, Icons.make("chevronDown", 14));
+      return box;
+    },
+
+    /**
+     * Full-screen viewer for rendered pages. Opens at actual pixel size, which
+     * is what the model receives, so you can judge whether the text is still
+     * legible; "Fit" shrinks it to the screen. A click anywhere outside the
+     * toolbar, or Esc, closes it; arrow keys page through.
+     * @param {{canvas:HTMLCanvasElement, label?:string}[]} pages
+     */
+    openLightbox(pages, index = 0) {
+      document.getElementById("ai-exporter-lightbox")?.remove();
+      const box = document.createElement("div");
+      box.id = "ai-exporter-lightbox";
+      box.setAttribute("role", "dialog");
+      box.setAttribute("aria-modal", "true");
+
+      const bar = document.createElement("div");
+      bar.className = "lb-bar";
+      const info = document.createElement("div");
+      info.className = "lb-info";
+      const title = document.createElement("span");
+      title.className = "lb-title";
+      const sub = document.createElement("span");
+      sub.className = "lb-sub";
+      info.append(title, sub);
+      const hint = document.createElement("span");
+      hint.className = "lb-hint";
+      hint.textContent = "Click anywhere or press Esc to close";
+      const button = (icon, text, label) => {
+        const b = document.createElement("button");
+        b.title = label;
+        if (icon) b.appendChild(Icons.make(icon, 16));
+        if (text) b.appendChild(document.createTextNode(text));
+        return b;
+      };
+      const prevBtn = button("chevronLeft", "", "Previous page (←)");
+      const nextBtn = button("chevronRight", "", "Next page (→)");
+      const fitBtn = button("maximize", "Fit", "Toggle fit-to-screen / actual size");
+      const closeBtn = button("close", "", "Close (Esc)");
+      bar.append(info, hint);
+      if (pages.length > 1) bar.append(prevBtn, nextBtn);
+      bar.append(fitBtn, closeBtn);
+
+      const stage = document.createElement("div");
+      stage.className = "lb-stage";
+      box.append(bar, stage);
+
+      let current = index;
+      const show = () => {
+        const page = pages[current];
+        // A copy, drawn from the source canvas: no data: URL for a site's
+        // img-src policy to refuse, and the original stays in the panel.
+        const view = document.createElement("canvas");
+        view.width = page.canvas.width;
+        view.height = page.canvas.height;
+        view.getContext("2d").drawImage(page.canvas, 0, 0);
+        while (stage.firstChild) stage.removeChild(stage.firstChild);
+        stage.appendChild(view);
+        stage.scrollTo(0, 0);
+        title.textContent = pages.length > 1 ? `Page ${current + 1} of ${pages.length}` : "Snapcompact page";
+        sub.textContent = `${view.width} × ${view.height}px · ~${Snapcompact.estimateTokens(page.canvas).toLocaleString()} tokens` +
+          (page.label ? ` · ${page.label}` : "");
+        prevBtn.disabled = current === 0;
+        nextBtn.disabled = current === pages.length - 1;
+      };
+      const setFit = (fit) => {
+        box.classList.toggle("fit", fit);
+        fitBtn.lastChild.textContent = fit ? "Actual size" : "Fit";
+      };
+      const close = () => {
+        box.remove();
+        document.removeEventListener("keydown", onKey, true);
+      };
+      const go = (step) => {
+        const next = current + step;
+        if (next < 0 || next >= pages.length) return;
+        current = next;
+        show();
+      };
+      // Captured first so the chat site's own shortcuts don't also fire.
+      const onKey = (e) => {
+        const handled = { Escape: close, ArrowLeft: () => go(-1), ArrowRight: () => go(1) }[e.key];
+        if (!handled) return;
+        e.preventDefault();
+        e.stopPropagation();
+        handled();
+      };
+
+      bar.addEventListener("click", (e) => e.stopPropagation());
+      box.addEventListener("click", close);
+      prevBtn.onclick = () => go(-1);
+      nextBtn.onclick = () => go(1);
+      fitBtn.onclick = () => setFit(!box.classList.contains("fit"));
+      closeBtn.onclick = close;
+      document.addEventListener("keydown", onKey, true);
+
+      setFit(false);
+      show();
+      document.body.appendChild(box);
+      closeBtn.focus();
+    },
+
+    /** The "Experimental" pill: a flask and the word. */
+    makeTag(text = "Experimental") {
+      const tag = document.createElement("span");
+      tag.className = "ai-exporter-tag";
+      tag.title = "Experimental — still being tuned; numbers and behaviour may change";
+      tag.append(Icons.make("flask", 10), document.createTextNode(text));
+      return tag;
+    },
+
+    /** Renders a rail tooltip card: title (+ tag), keys, description. */
+    fillTooltip(tip, { title, desc, keys, tag }) {
+      while (tip.firstChild) tip.removeChild(tip.firstChild);
+      const head = document.createElement("div");
+      head.className = "tt-head";
+      const titleEl = document.createElement("span");
+      titleEl.className = "tt-title";
+      titleEl.textContent = title;
+      head.appendChild(titleEl);
+      if (tag) head.appendChild(UI.makeTag());
+      if (keys && keys.length) {
+        const keysEl = document.createElement("span");
+        keysEl.className = "tt-keys";
+        keys.forEach((k) => {
+          const kbd = document.createElement("kbd");
+          kbd.textContent = k;
+          keysEl.appendChild(kbd);
+        });
+        head.appendChild(keysEl);
+      }
+      tip.appendChild(head);
+      if (desc) {
+        const descEl = document.createElement("div");
+        descEl.className = "tt-desc";
+        descEl.textContent = desc;
+        tip.appendChild(descEl);
+      }
     },
 
     attachDrag(handle, panel) {
@@ -2701,9 +4648,9 @@
     toggleQuickDock() {
       UI.quickDockEnabled = !UI.quickDockEnabled;
       Store.set(Config.GM_KEYS.QUICKDOCK_ENABLED, UI.quickDockEnabled);
-      const btn = document.getElementById("ai-exporter-rail-quickdock");
-      const labelEl = btn?.querySelector(".rail-icon-text");
-      if (labelEl) labelEl.textContent = UI.quickDockEnabled ? "QD" : "qd";
+      document
+        .getElementById("ai-exporter-rail-quickdock")
+        ?.classList.toggle("off", !UI.quickDockEnabled);
       QuickDock.sync();
     },
 
@@ -2713,11 +4660,14 @@
       const btn = document.getElementById("ai-exporter-rail-scroll");
       if (!btn) return;
       const isEnabled = UI.autoScrollEnabled;
-      const labelEl = btn.querySelector(".rail-icon-text");
-      if (labelEl) labelEl.textContent = isEnabled ? "ON" : "OFF";
+      btn.classList.toggle("off", !isEnabled);
       const tip = btn.querySelector(".ai-exporter-tooltip");
       if (tip)
-        tip.textContent = `Auto-scroll is ${isEnabled ? "ON" : "OFF"} (ALT+A)`;
+        UI.fillTooltip(tip, {
+          title: "Auto-scroll",
+          desc: `Load the full history before exporting — ${isEnabled ? "on" : "off"}.`,
+          keys: ["Alt", "A"],
+        });
     },
 
     /* ---------------- Section switching ---------------- */
@@ -2749,8 +4699,9 @@
 
       while (contentBody.firstChild)
         contentBody.removeChild(contentBody.firstChild);
-      document.getElementById("ai-exporter-content-title").textContent =
-        UI._sections[id].title;
+      const titleEl = document.getElementById("ai-exporter-content-title");
+      titleEl.textContent = UI._sections[id].title;
+      if (UI._sections[id].experimental) titleEl.appendChild(UI.makeTag());
       contentBody.appendChild(UI._sections[id].body);
       contentEl.classList.add("open");
       if (typeof UI._sections[id].onShow === "function")
@@ -2778,6 +4729,8 @@
       UI.sections.registerMinifierSection();
       UI.sections.registerToonSection();
       UI.sections.registerSnapcompactSection();
+      UI.sections.registerMeterSection();
+      UI.sections.registerHandoffSection();
     },
 
     /* ---------------- Feature sections (each is self-contained) ---------------- */
@@ -3026,7 +4979,7 @@
           select.appendChild(opt);
         });
         select.value = "custom";
-        wrap.appendChild(select);
+        wrap.appendChild(UI.wrapSelect(select));
 
         /* ---- per-tool turn checklist (only shown for "pick turns") ---- */
         const picker = document.createElement("div");
@@ -3429,20 +5382,20 @@
             const actions = document.createElement("div");
             actions.className = "ai-exporter-prompt-actions";
             [
-              ["⧉", "Copy prompt", () =>
+              ["copy", "Copy prompt", () =>
                 navigator.clipboard
                   .writeText(prompt.body)
                   .then(() => setStatus("Copied to clipboard."))],
-              ["✎", "Edit prompt", () => openForm(prompt)],
-              ["✕", "Delete prompt", () => {
+              ["edit", "Edit prompt", () => openForm(prompt)],
+              ["trash", "Delete prompt", () => {
                 if (!confirm(`Delete "${prompt.title}"?`)) return;
                 PromptStore.remove(prompt.id);
                 setStatus("Deleted. Press “Sync gist” to mirror the change.");
               }],
-            ].forEach(([glyph, tip, handler]) => {
+            ].forEach(([icon, tip, handler]) => {
               const btn = document.createElement("button");
               btn.className = "ai-exporter-mini-btn";
-              btn.textContent = glyph;
+              btn.appendChild(Icons.make(icon, 12));
               btn.title = tip;
               btn.onclick = (e) => {
                 e.stopPropagation();
@@ -3865,10 +5818,17 @@
             const previewImg = document.createElement("img");
             previewImg.className = "ai-exporter-preview-img";
             previewImg.src = page.canvas.toDataURL("image/png");
+            previewImg.title = "Click to view full size";
+            previewImg.onclick = () => UI.openLightbox(pages, i);
             pageWrap.appendChild(previewImg);
             const btnRow = document.createElement("div");
             btnRow.className = "ai-exporter-btn-row";
             btnRow.style.marginTop = "6px";
+            const viewBtn = document.createElement("button");
+            viewBtn.className = "ai-exporter-btn secondary";
+            viewBtn.append(Icons.make("maximize", 13), document.createTextNode("View full size"));
+            viewBtn.onclick = () => UI.openLightbox(pages, i);
+            btnRow.appendChild(viewBtn);
             const copyBtn = document.createElement("button");
             copyBtn.className = "ai-exporter-btn secondary";
             copyBtn.textContent = "Copy Image";
@@ -3918,6 +5878,374 @@
           onShow: source.refresh,
         };
       },
+
+      /**
+       * The detailed view behind the Quick Dock's traffic light: how full the
+       * chat is, where the tokens went, and the budget that drives the colours.
+       */
+      registerMeterSection() {
+        const el = (tag, className, text) => {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text) node.textContent = text;
+          return node;
+        };
+        const wrap = el("div");
+        wrap.style.display = "flex";
+        wrap.style.flexDirection = "column";
+        wrap.style.gap = "8px";
+
+        const status = el("div", "ai-exporter-meter-status");
+        const statusTitle = el("b");
+        const statusDetail = el("span");
+        status.append(statusTitle, statusDetail);
+        wrap.appendChild(status);
+
+        const bar = el("div", "ai-exporter-meter-bar");
+        const fill = el("div", "ai-exporter-meter-fill");
+        const warnTick = el("div", "ai-exporter-meter-tick");
+        const critTick = el("div", "ai-exporter-meter-tick");
+        bar.append(fill, warnTick, critTick);
+        wrap.appendChild(bar);
+        const caption = el("div", "ai-exporter-meter-caption");
+        const captionUsed = el("span");
+        const captionPct = el("span");
+        caption.append(captionUsed, captionPct);
+        wrap.appendChild(caption);
+
+        const grid = el("div", "ai-exporter-meter-grid");
+        const stat = (label) => {
+          const value = el("span");
+          grid.append(el("span", "", label), value);
+          return value;
+        };
+        const stats = {
+          source: stat("Counted from"),
+          method: stat("Tokenizer"),
+          chat: stat("Conversation"),
+          composer: stat("Unsent text in the input box"),
+          user: stat("Your messages"),
+          ai: stat("AI replies"),
+          context: stat("Instructions, memory, tools, files"),
+          uncounted: stat("Images / files (not countable)"),
+          largest: stat("Largest single item"),
+          perTurn: stat("Average per turn"),
+          turnsLeft: stat("Turns until red (at that pace)"),
+        };
+        wrap.appendChild(grid);
+        const countStatus = el("div", "ai-exporter-status-line");
+        wrap.appendChild(countStatus);
+
+        // The site's own quota numbers, where it publishes them (claude.ai).
+        const usageBox = el("div", "ai-exporter-fieldset");
+        usageBox.hidden = true;
+        usageBox.appendChild(el("span", "ai-exporter-section-label", "Plan usage (from the site)"));
+        const usageGrid = el("div", "ai-exporter-meter-grid");
+        usageBox.appendChild(usageGrid);
+        wrap.appendChild(usageBox);
+
+        const actions = el("div", "ai-exporter-btn-row");
+        const handoffBtn = el("button", "ai-exporter-btn", "Ask for handoff summary");
+        handoffBtn.title = "Puts a 'summarize this chat for a new one' prompt in the input box";
+        const newChatBtn = el("button", "ai-exporter-btn secondary", "New chat with context");
+        newChatBtn.title = "Open a new chat with this whole conversation in the input box (options: the arrow button in the dock)";
+        const recountBtn = el("button", "ai-exporter-btn secondary", "Recount now");
+        recountBtn.title = "Re-read the whole conversation from the site and count it again";
+        actions.append(handoffBtn, newChatBtn, recountBtn);
+        wrap.appendChild(actions);
+        const actionStatus = el("div", "ai-exporter-status-line");
+        wrap.appendChild(actionStatus);
+
+        /* ---- budget settings ---- */
+        const settings = el("div", "ai-exporter-fieldset");
+        const budgetLabel = el("label", "ai-exporter-section-label");
+        settings.appendChild(budgetLabel);
+        const budgetInput = el("input");
+        budgetInput.type = "number";
+        budgetInput.min = "1000";
+        budgetInput.step = "1000";
+        settings.appendChild(budgetInput);
+        const pctRow = el("div", "ai-exporter-inline-fields");
+        const pctField = (text) => {
+          const label = el("label", "", text);
+          const input = el("input");
+          input.type = "number";
+          input.min = "1";
+          input.max = "100";
+          label.appendChild(input);
+          pctRow.appendChild(label);
+          return input;
+        };
+        const warnInput = pctField("Yellow at %");
+        const critInput = pctField("Red at %");
+        settings.appendChild(pctRow);
+
+        // Only for sites whose exact count needs the provider's API.
+        const keyBox = el("div");
+        keyBox.style.display = "flex";
+        keyBox.style.flexDirection = "column";
+        keyBox.style.gap = "4px";
+        const keyLabel = el("label", "ai-exporter-section-label");
+        const keyInput = el("input");
+        keyInput.type = "password";
+        const modelLabel = el("label", "ai-exporter-section-label", "Model to count with:");
+        const modelInput = el("input");
+        modelInput.type = "text";
+        const keyHelp = el("div", "ai-exporter-status-line");
+        keyBox.append(keyLabel, keyInput, modelLabel, modelInput, keyHelp);
+        settings.appendChild(keyBox);
+
+        const settingsRow = el("div", "ai-exporter-btn-row");
+        const saveBtn = el("button", "ai-exporter-btn", "Save");
+        const resetBtn = el("button", "ai-exporter-btn secondary", "Defaults");
+        settingsRow.append(saveBtn, resetBtn);
+        settings.appendChild(settingsRow);
+        wrap.appendChild(settings);
+
+        const note = el(
+          "div",
+          "ai-exporter-status-line",
+          "The whole conversation is read from the site itself, from the " +
+            "first turn. The site's hidden system prompt, images and PDFs " +
+            "cannot be counted from here, so the real total is somewhat " +
+            "higher. Keep the budget well under the model's context window: " +
+            "answers usually get worse long before the hard limit.",
+        );
+        wrap.appendChild(note);
+
+        const apiProvider = () => Tokenizers.METHODS[UI._platform?.id]?.provider || "";
+
+        const fillSettings = () => {
+          const { warn, crit } = Meter.thresholds();
+          budgetLabel.textContent = `Token budget for ${UI._platform?.id || "this site"}:`;
+          budgetInput.value = Meter.budget();
+          warnInput.value = warn;
+          critInput.value = crit;
+          const provider = apiProvider();
+          keyBox.style.display = provider ? "flex" : "none";
+          if (!provider) return;
+          const info = Tokenizers.PROVIDERS[provider];
+          const saved = Tokenizers.settings()[provider] || {};
+          keyLabel.textContent = `${info.keyLabel}:`;
+          keyInput.placeholder = info.keyHint;
+          keyInput.value = saved.key || "";
+          modelInput.placeholder = `${info.defaultModel} (or the chat's own model)`;
+          modelInput.value = saved.model || "";
+          keyHelp.textContent =
+            `Exact counts on this site come from the ${info.name} (free). ` +
+            "The key stays in Tampermonkey storage and the conversation text " +
+            "goes only to that API. Leave it empty to use the estimate.";
+        };
+
+        const colors = {
+          ok: Theme.tokens.meterOk,
+          warn: Theme.tokens.meterWarn,
+          crit: Theme.tokens.meterCrit,
+        };
+        const fmt = Utils.formatTokens;
+        Meter.subscribe("section", (m) => {
+          wrap.style.setProperty("--meter-color", colors[m.level]);
+          statusTitle.textContent = Meter.LEVELS[m.level].title;
+          statusDetail.textContent = Meter.LEVELS[m.level].detail;
+          fill.style.width = `${Math.min(100, m.pct)}%`;
+          warnTick.style.left = `${m.warn}%`;
+          critTick.style.left = `${m.crit}%`;
+          // "~" marks numbers that are estimated or shared out of an exact total.
+          const total = m.exact ? "" : "~";
+          const part = m.perExact ? "" : "~";
+          captionUsed.textContent = `${total}${fmt(m.total)} / ${fmt(m.budget)} tokens`;
+          captionPct.textContent = `${Math.round(m.pct)}%`;
+          stats.source.textContent = m.pending
+            ? "page (loading history…)"
+            : m.source === "history" ? "full history" : "visible page only";
+          stats.method.textContent = m.method || "—";
+          stats.chat.textContent = `${total}${fmt(m.tokens)} · ${m.messages} msgs`;
+          stats.composer.textContent = `${m.exact && m.perExact ? "" : "~"}${fmt(m.composerTokens)}`;
+          stats.user.textContent = `${part}${fmt(m.userTokens)} · ${m.turns} turns`;
+          stats.ai.textContent = `${part}${fmt(m.aiTokens)}`;
+          stats.context.textContent = `${part}${fmt(m.contextTokens)}`;
+          stats.uncounted.textContent = m.uncounted ? String(m.uncounted) : "none";
+          stats.largest.textContent = `${part}${fmt(m.largest)}`;
+          stats.perTurn.textContent = m.perTurn ? `${part}${fmt(Math.round(m.perTurn))}` : "—";
+          stats.turnsLeft.textContent =
+            m.level === "crit" ? "past it" : m.turnsLeft === null ? "—" : `~${m.turnsLeft}`;
+          countStatus.textContent = [
+            m.historyError && `Couldn't read the full history (${m.historyError}) — counting the page instead.`,
+            m.error,
+          ].filter(Boolean).join(" ");
+
+          const limits = m.usage?.limits || [];
+          usageBox.hidden = !limits.length;
+          while (usageGrid.firstChild) usageGrid.removeChild(usageGrid.firstChild);
+          limits.forEach((l) => {
+            const when = l.resetsAt ? new Date(l.resetsAt) : null;
+            const resets = when && !isNaN(when) ? ` · resets ${when.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : "";
+            usageGrid.append(el("span", "", l.label), el("span", "", `${Math.round(l.percent)}%${resets}`));
+          });
+        });
+
+        handoffBtn.onclick = () => {
+          if (Composer.insert(Config.METER.HANDOFF_PROMPT)) {
+            actionStatus.textContent =
+              "Handoff prompt is in the input box — send it, then paste the " +
+              "summary into a new chat.";
+            return;
+          }
+          navigator.clipboard
+            .writeText(Config.METER.HANDOFF_PROMPT)
+            .then(() => (actionStatus.textContent = "No input box found — prompt copied."))
+            .catch(() => (actionStatus.textContent = "No input box found on this page."));
+        };
+        newChatBtn.onclick = () => Handoff.start((msg) => (actionStatus.textContent = msg));
+        recountBtn.onclick = () => {
+          actionStatus.textContent = "Recounting…";
+          clearTimeout(Meter._timer);
+          Meter.recount().then(() => (actionStatus.textContent = "Recounted."));
+        };
+        saveBtn.onclick = () => {
+          const warn = Number(warnInput.value);
+          const crit = Number(critInput.value);
+          if (!(warn > 0 && crit > warn && crit <= 100))
+            return (actionStatus.textContent = "Yellow must be below red, both between 1 and 100.");
+          Meter.setBudget(Number(budgetInput.value));
+          Meter.setThresholds(warn, crit);
+          const provider = apiProvider();
+          if (provider) {
+            Tokenizers.configure(provider, { key: keyInput.value, model: modelInput.value });
+            Meter.schedule(true);
+          }
+          fillSettings();
+          actionStatus.textContent = "Meter settings saved.";
+        };
+        resetBtn.onclick = () => {
+          Meter.setBudget(0);
+          Meter.setThresholds(Config.METER.WARN_PCT, Config.METER.CRIT_PCT);
+          fillSettings();
+          actionStatus.textContent = "Back to the default budget and thresholds.";
+        };
+
+        UI._sections["meter"] = {
+          title: "Context meter",
+          experimental: true,
+          body: wrap,
+          onShow: () => {
+            fillSettings();
+            actionStatus.textContent = "";
+            Meter.notify();
+          },
+        };
+      },
+
+      /**
+       * Options for "New chat with context" — the Quick Dock button uses
+       * whatever is saved here.
+       */
+      registerHandoffSection() {
+        const el = (tag, className, text) => {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text) node.textContent = text;
+          return node;
+        };
+        const wrap = el("div");
+        wrap.style.display = "flex";
+        wrap.style.flexDirection = "column";
+        wrap.style.gap = "10px";
+
+        wrap.appendChild(
+          el(
+            "div",
+            "ai-exporter-status-line",
+            "Opens a new chat with this whole conversation already in the " +
+              "input box, from the first turn. Nothing is sent until you press " +
+              "send. The Quick Dock's arrow button uses these settings.",
+          ),
+        );
+
+        wrap.appendChild(el("span", "ai-exporter-section-label", "Carry the chat over as"));
+        const grid = el("div", "ai-exporter-radio-grid");
+        const radios = {};
+        Object.entries(Handoff.FORMATS).forEach(([key, f]) => {
+          const card = el("label", "ai-exporter-radio-card");
+          const input = el("input");
+          input.type = "radio";
+          input.name = "ai-exporter-handoff-format";
+          input.value = key;
+          card.append(input, el("b", "", f.name), el("span", "", f.detail));
+          grid.appendChild(card);
+          radios[key] = input;
+        });
+        wrap.appendChild(grid);
+
+        wrap.appendChild(el("span", "ai-exporter-section-label", "Include"));
+        const check = (text) => {
+          const row = el("label", "ai-exporter-check-row");
+          const input = el("input");
+          input.type = "checkbox";
+          row.append(input, document.createTextNode(text));
+          wrap.appendChild(row);
+          return input;
+        };
+        const attachments = check("Text of attached files");
+        const tools = check("Tool calls and results (search, code)");
+        const newTab = check("Open in a new tab (keeps this chat open)");
+
+        wrap.appendChild(el("span", "ai-exporter-section-label", "Opening message"));
+        const preamble = el("textarea");
+        preamble.style.height = "84px";
+        preamble.style.fontFamily = "inherit";
+        preamble.style.fontSize = "12px";
+        wrap.appendChild(preamble);
+
+        const row = el("div", "ai-exporter-btn-row");
+        const startBtn = el("button", "ai-exporter-btn", "Start new chat with context");
+        const resetBtn = el("button", "ai-exporter-btn secondary", "Defaults");
+        row.append(startBtn, resetBtn);
+        wrap.appendChild(row);
+        const status = el("div", "ai-exporter-status-line");
+        wrap.appendChild(status);
+
+        const fill = () => {
+          const opts = Handoff.settings();
+          (radios[opts.format] || radios.toon).checked = true;
+          attachments.checked = opts.attachments;
+          tools.checked = opts.tools;
+          newTab.checked = opts.newTab;
+          preamble.value = opts.preamble;
+        };
+        // Every change saves at once, so the Quick Dock button is in step.
+        const persist = () => {
+          Handoff.save({
+            format: Object.keys(radios).find((k) => radios[k].checked) || "toon",
+            attachments: attachments.checked,
+            tools: tools.checked,
+            newTab: newTab.checked,
+            preamble: preamble.value.trim() ? preamble.value : Config.HANDOFF.DEFAULTS.preamble,
+          });
+          status.textContent = "Saved.";
+        };
+        [...Object.values(radios), attachments, tools, newTab].forEach((i) => (i.onchange = persist));
+        preamble.onchange = persist;
+        startBtn.onclick = () => {
+          persist();
+          Handoff.start((msg) => (status.textContent = msg));
+        };
+        resetBtn.onclick = () => {
+          Store.set(Config.GM_KEYS.HANDOFF_SETTINGS, {});
+          fill();
+          status.textContent = "Back to the defaults.";
+        };
+
+        UI._sections["handoff"] = {
+          title: "New chat with context",
+          experimental: true,
+          body: wrap,
+          onShow: () => {
+            fill();
+            status.textContent = "";
+          },
+        };
+      },
     },
 
     /* ---------------- Lifecycle: refresh, observers, autoscroll, shortcuts ---------------- */
@@ -3961,6 +6289,7 @@
 
       if (!hasDataChanged) return;
       ChatExporter._currentChatData = freshChatData;
+      Meter.setChat(freshChatData);
       // Re-render even when the chat went empty (a new chat was opened), so a
       // stale outline from the previous conversation is cleared out.
       if (typeof UI._renderOutlineItemsMd === "function")
@@ -4214,12 +6543,14 @@
         UI.initUrlChangeObserver();
         UI._initialListenersAttached = true;
       }
+      Theme.loadFont();
       const start = () => {
         setTimeout(() => {
           UI.ensurePanel();
           UI.buildAllSections();
           QuickDock.start();
           UI.refresh();
+          Handoff.consumePending();
           if (UI._platform.hasAutoScroll)
             setTimeout(
               () => UI.autoScrollToTop(),
@@ -4256,6 +6587,166 @@
     _timer: null,
     _resizeObserver: null,
     _started: false,
+    _toast: null,
+    _toastTimer: null,
+
+    makeIcon(icon, title, handler) {
+      const btn = document.createElement("button");
+      btn.className = "qd-icon";
+      btn.title = title;
+      if (icon) btn.appendChild(Icons.make(icon, 14));
+      btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        handler(btn);
+      };
+      return btn;
+    },
+
+    /** A short message above the bar, for tools that change the input box. */
+    flash(text) {
+      const toast = QuickDock._toast;
+      if (!toast) return;
+      toast.textContent = text;
+      toast.classList.add("show");
+      clearTimeout(QuickDock._toastTimer);
+      QuickDock._toastTimer = setTimeout(() => toast.classList.remove("show"), 2600);
+    },
+
+    /**
+     * One-click versions of the Floating Dock tools. Each reads the whole
+     * input box and writes the result straight back into it; Ctrl+Z in the
+     * box undoes the change.
+     */
+    tools: {
+      /** The composer text, or null after saying why there is none. */
+      read() {
+        const text = Composer.getText();
+        if (text === null) QuickDock.flash("No input box found");
+        else if (!text.trim()) QuickDock.flash("The input box is empty");
+        else return text;
+        return null;
+      },
+
+      replace(before, after, label) {
+        if (after === before) return QuickDock.flash(`${label}: nothing to change`);
+        if (!Composer.setText(after)) return QuickDock.flash("No input box found");
+        const a = Utils.estimateTokens(before);
+        const b = Utils.estimateTokens(after);
+        const saved = a ? Math.round(((a - b) / a) * 100) : 0;
+        QuickDock.flash(
+          `${label}: ~${Utils.formatTokens(a)} → ~${Utils.formatTokens(b)} tokens` +
+            (saved > 0 ? ` (−${saved}%)` : ""),
+        );
+        Meter.tick();
+      },
+
+      /** TOON output indents its top level by one space; drop it. */
+      toToon(value) {
+        return Lib.jsonToToon(value).replace(/^ /gm, "");
+      },
+
+      toon() {
+        const t = QuickDock.tools;
+        const text = t.read();
+        if (text === null) return;
+        let out;
+        try {
+          out = t.toToon(JSON.parse(text.trim()));
+        } catch (e) {
+          // Not one JSON document: convert each fenced JSON block inside a
+          // prompt instead, leaving the prose around them alone.
+          let converted = 0;
+          out = text.replace(/```(?:json5?|jsonc)?[ \t]*\n([\s\S]*?)```/gi, (block, body) => {
+            try {
+              const toon = t.toToon(JSON.parse(body));
+              converted++;
+              return "```toon\n" + toon + "\n```";
+            } catch (err) {
+              return block;
+            }
+          });
+          // Or prose followed by raw JSON: everything from the first line that
+          // opens with { or [ to the end of the box.
+          const tail = !converted && text.match(/^[[{][\s\S]*$/m);
+          if (tail) {
+            try {
+              out = text.slice(0, tail.index) + t.toToon(JSON.parse(tail[0]));
+              converted++;
+            } catch (err) {
+              /* the tail is not JSON either */
+            }
+          }
+          if (!converted) return QuickDock.flash("No valid JSON in the input box");
+        }
+        t.replace(text, out, "TOON");
+      },
+
+      minify() {
+        const t = QuickDock.tools;
+        const text = t.read();
+        if (text === null) return;
+        t.replace(text, text.replace(/\s+/g, " ").trim(), "Minified");
+      },
+
+      /** Renders the text to PNG pages and attaches them in its place. */
+      async snap(btn) {
+        const text = QuickDock.tools.read();
+        if (text === null) return;
+        let flat = text.trim();
+        try {
+          if (/^[[{]/.test(flat)) flat = QuickDock.tools.toToon(JSON.parse(flat));
+        } catch (e) {
+          /* not JSON — render as plain text */
+        }
+        flat = flat.replace(/\s+/g, " ").trim();
+        btn.disabled = true;
+        try {
+          const pages = Snapcompact.renderPages(flat, { fontSizePx: 10 });
+          const blobs = await Promise.all(
+            pages.map((p) => new Promise((res) => p.canvas.toBlob(res, "image/png"))),
+          );
+          const files = blobs.map(
+            (b, i) => new File([b], `snapcompact-${i + 1}.png`, { type: "image/png" }),
+          );
+          // Also on the clipboard, in case the site ignored the attach.
+          navigator.clipboard
+            .write([new ClipboardItem({ "image/png": blobs[0] })])
+            .catch(() => {});
+          const imageTokens = pages.reduce(
+            (sum, p) => sum + Snapcompact.estimateTokens(p.canvas),
+            0,
+          );
+          const summary =
+            `~${Utils.formatTokens(Utils.estimateTokens(text))} text tokens → ` +
+            `${pages.length} image${pages.length > 1 ? "s" : ""} ≈ ` +
+            `${Utils.formatTokens(imageTokens)}`;
+          if (!Composer.attachFiles(files))
+            return QuickDock.flash(`Couldn't attach — image copied, press Ctrl+V. ${summary}`);
+          Composer.setText("");
+          Meter.tick();
+          QuickDock.flash(`Attached: ${summary}`);
+        } catch (e) {
+          QuickDock.flash(`Snapcompact failed: ${e.message}`);
+        } finally {
+          btn.disabled = false;
+        }
+      },
+
+      /** Saves the input box as a library prompt; an empty box opens the form. */
+      savePrompt() {
+        const text = Composer.getText();
+        if (!text || !text.trim()) {
+          if (typeof UI._openNewPromptForm === "function") UI._openNewPromptForm();
+          return;
+        }
+        const firstLine = text.trim().split("\n")[0];
+        const title = window.prompt("Save as prompt — title:", Utils.truncate(firstLine, 40));
+        if (title === null) return;
+        PromptStore.add(title.trim() || Utils.truncate(firstLine, 40), text);
+        QuickDock.flash("Saved to the prompt library");
+      },
+    },
 
     ensureEl() {
       if (QuickDock._el && QuickDock._el.isConnected) return QuickDock._el;
@@ -4267,38 +6758,64 @@
       scroll.className = "qd-scroll";
       bar.appendChild(scroll);
 
-      const addBtn = document.createElement("button");
-      addBtn.className = "qd-icon";
-      addBtn.textContent = "+";
-      addBtn.title = "Save a new prompt";
-      addBtn.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (typeof UI._openNewPromptForm === "function") UI._openNewPromptForm();
+      const tools = document.createElement("div");
+      tools.className = "qd-tools";
+      const sep = () => {
+        const line = document.createElement("span");
+        line.className = "qd-sep";
+        return line;
       };
-      bar.appendChild(addBtn);
 
-      const libBtn = document.createElement("button");
-      libBtn.className = "qd-icon";
-      libBtn.textContent = "☰";
-      libBtn.title = "Open the prompt library";
-      libBtn.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        UI.showSection("prompts");
-      };
-      bar.appendChild(libBtn);
+      const meterBtn = QuickDock.makeIcon(null, "Context meter", () =>
+        UI.showSection("meter"),
+      );
+      meterBtn.classList.add("qd-meter");
+      const dot = document.createElement("span");
+      dot.className = "qd-meter-dot";
+      meterBtn.appendChild(dot);
 
-      const hideBtn = document.createElement("button");
-      hideBtn.className = "qd-icon";
-      hideBtn.textContent = "✕";
-      hideBtn.title = "Hide the Quick Dock (ALT+Q to bring it back)";
-      hideBtn.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        UI.toggleQuickDock();
-      };
-      bar.appendChild(hideBtn);
+      tools.append(
+        meterBtn,
+        sep(),
+        QuickDock.makeIcon("toon", "JSON → TOON: convert the JSON in the input box", () =>
+          QuickDock.tools.toon(),
+        ),
+        QuickDock.makeIcon("minify", "Minify: collapse the whitespace in the input box", () =>
+          QuickDock.tools.minify(),
+        ),
+        QuickDock.makeIcon("image", "Snapcompact: swap the input box text for a dense image", (btn) =>
+          QuickDock.tools.snap(btn),
+        ),
+        QuickDock.makeIcon("bookmarkPlus", "Save the input box text as a prompt", () =>
+          QuickDock.tools.savePrompt(),
+        ),
+        sep(),
+        QuickDock.makeIcon(
+          "handoff",
+          "New chat with this whole chat as context (experimental) — format and options in the Floating Dock",
+          () => Handoff.start((msg) => QuickDock.flash(msg)),
+        ),
+        QuickDock.makeIcon("library", "Open the prompt library", () =>
+          UI.showSection("prompts"),
+        ),
+        QuickDock.makeIcon("close", "Hide the Quick Dock (ALT+Q to bring it back)", () =>
+          UI.toggleQuickDock(),
+        ),
+      );
+      bar.appendChild(tools);
+
+      const toast = document.createElement("div");
+      toast.className = "qd-toast";
+      bar.appendChild(toast);
+      QuickDock._toast = toast;
+
+      Meter.subscribe("quickdock", (m) => {
+        meterBtn.dataset.level = m.level;
+        meterBtn.title =
+          `${Meter.LEVELS[m.level].title} — ${m.exact ? "" : "~"}${Utils.formatTokens(m.total)} of ` +
+          `${Utils.formatTokens(m.budget)} tokens (${Math.round(m.pct)}%). Context meter, experimental — click for details.`;
+        bar.classList.toggle("level-crit", m.level === "crit");
+      });
 
       // Clicking the bar must never steal focus from the composer, otherwise
       // the caret position we are about to insert at is lost.
@@ -4321,7 +6838,7 @@
       if (!prompts.length) {
         const note = document.createElement("span");
         note.className = "qd-empty";
-        note.textContent = "No saved prompts — press + to add one";
+        note.textContent = "No saved prompts — type one in the box and press the bookmark icon";
         scroll.appendChild(note);
         return;
       }
@@ -4429,7 +6946,8 @@
       // Checked every tick: the site's floating buttons come and go while the
       // composer itself stays put.
       const tucked = QuickDock.hitsControl(top, left, width, barHeight);
-      const iconsWidth = 96; // the three icon buttons plus padding
+      const tools = bar.querySelector(".qd-tools");
+      const iconsWidth = (tools ? tools.offsetWidth : 96) + 12; // plus padding
       const blocked =
         tucked && QuickDock.hitsControl(top, left + width - iconsWidth, iconsWidth, barHeight);
       // Don't collapse a bar the pointer is on; that would yank it away mid-click.
@@ -4518,6 +7036,7 @@
           QuickDock.sync();
         else QuickDock.position();
         QuickDock.updateCovered();
+        Meter.tick();
       }, Config.QUICKDOCK_POLL_MS);
 
       // Menus open and close on a click or key press, often with a short
