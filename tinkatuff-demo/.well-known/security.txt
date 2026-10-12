@@ -1,0 +1,4 @@
+Contact: mailto:security@demo.invalid
+Expires: 2030-01-01T00:00:00Z
+Encryption: http://localhost:8765/pgp-key.txt
+Preferred-Languages: en
