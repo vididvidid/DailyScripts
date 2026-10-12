@@ -5,6 +5,11 @@
  *
  * versions:
  *
+ * 0.1.3          tall photos are no longer cut off at both ends when turned
+ *                sideways — the boxes WhatsApp wraps a photo in are sized
+ *                to it and clip, so while a photo is rotated they are
+ *                allowed to overflow (given back on rotate-to-0 / close)
+ *
  * 0.1.2          blur fix made sturdier: hides more kinds of backdrop and
  *                lays a plain panel under the rotated photo; green dot is
  *                now positioned beside the title instead of inside it (it
@@ -59,7 +64,7 @@
 // ==UserScript==
 // @name         WhatsApp Web – Rotate Image
 // @namespace    https://github.com/vididvidid/aiutils
-// @version      0.1.2
+// @version      0.1.3
 // @description  Adds rotate left / right buttons to the WhatsApp Web image viewer
 // @author       vididvidid
 // @match        https://web.whatsapp.com/*
@@ -80,7 +85,7 @@
   const CHECK_THROTTLE_MS = 150;
   const ID                = 'wa-rotate';
 
-  const VERSION = '0.1.2';
+  const VERSION = '0.1.3';
   const log = (...a) => console.log('[wa-rotate]', ...a);
 
   const rotations = new Map();     // media src → degrees (0/90/180/270)
@@ -281,6 +286,20 @@
       if ((cs.filter || '').includes('blur')) { hide(a, 'filter', 'none'); found.push(a); }
     }
 
+    // 1b. The photo's wrappers are sized to it and clip their content, so a
+    //     turned photo that is now wider than it was tall lost both ends.
+    //     Let them overflow while rotated — up to, not including, the
+    //     full-window viewer, which may keep clipping at the window edge.
+    const unclipped = [];
+    for (let a = el.parentElement, i = 0; a && a !== document.body && i < 12; a = a.parentElement, i++) {
+      const b = a.getBoundingClientRect();
+      if (b.width >= innerWidth * 0.95 && b.height >= innerHeight * 0.8) break;
+      const cs = getComputedStyle(a);
+      if (cs.overflowX !== 'visible' || cs.overflowY !== 'visible') { hide(a, 'overflow', 'visible'); unclipped.push(a); }
+      if (cs.clipPath && cs.clipPath !== 'none') { hide(a, 'clip-path', 'none'); unclipped.push(a); }
+      if (/paint|strict|content/.test(cs.contain || '')) { hide(a, 'contain', 'none'); unclipped.push(a); }
+    }
+
     // 2. The cover panel: an earlier sibling of the photo, same box, plain
     //    colour. The photo is made position:relative (if it wasn't
     //    positioned) so it still paints above the panel.
@@ -298,6 +317,7 @@
     el.parentElement.insertBefore(cover, el);
 
     log('rotated', rotations.get(keyOf(el)), '° — hid', found.length, 'backdrop element(s):', found,
+        '| unclipped', unclipped.length, 'wrapper(s):', unclipped,
         '| photo:', el, '| cover colour:', cover.style.background);
   }
 
