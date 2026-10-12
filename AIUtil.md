@@ -39,21 +39,45 @@ Inter typeface; it is fetched once from jsDelivr and registered from its bytes,
 so a site's font policy cannot block it (without it they fall back to the
 system font).
 
-Rail icons, top to bottom:
+The rail is two columns wide, with related tools side by side. Rail icons,
+left to right, top to bottom:
 
 | Icon | Tool | Shortcut |
 | --- | --- | --- |
 | open book | Prompt Library | `ALT+P` |
+| sparkle | Skills Library | `ALT+K` |
 | page with lines | Export chat to Markdown | `ALT+M` |
 | page with braces | Export chat to JSON | `ALT+J` |
-| sliders | Output filename format | |
 | `{ }` | JSON → TOON converter | |
 | inward arrows | Text Minifier | |
 | picture | Snapcompact (chat → dense PNG) | |
+| sliders | Output filename format | |
 | lightning bolt | Show/hide the Quick Dock (dimmed when off) | `ALT+Q` |
 | gauge | Context meter (the dot in its corner is the current colour) — *experimental* | |
 | speech bubble with arrow | New chat with context — *experimental* | |
 | arrow to top | Auto-scroll (Gemini only; dimmed when off) | `ALT+A` |
+
+## Skills Library
+
+Like the Prompt Library, but for *skills*: reusable instruction sets you want
+the model to follow — a code-review checklist, a writing style, a PDF workflow.
+
+- **+ New skill** — a name, an optional "use when" line, and the instructions.
+- **Import .md** — add one or more `SKILL.md`-style files. YAML front matter
+  `name:` and `description:` are read; everything after it is the instructions.
+  Without front matter the filename becomes the name.
+- **Click a skill** to bring it into the chat. *On click* picks how:
+  - *Type it into the input box* (default) — inserted as
+    `<skill name="…">Use when: …\n…instructions…</skill>`, so you can add your
+    message under it.
+  - *Attach it as a .md file* — attached as `<name>.md` in `SKILL.md` layout.
+    If the site will not take the file, it falls back to typing it in.
+- Copy (as `SKILL.md`), edit and delete per skill; filter by name, description
+  or text.
+
+Skills are stored alongside your prompts and sync through the same gist
+(**Sync gist** in either library). They also show on the Quick Dock as dashed
+chips with a sparkle, after your prompts.
 
 ## Prompt Library
 
@@ -140,6 +164,7 @@ Left to right:
   conversation already in its input box, in the format picked in the Floating
   Dock. See [New chat with context](#new-chat-with-context).
 - **Book** — open the full Prompt Library.
+- **Sparkle** — open the Skills Library.
 - **`✕`** — hide the dock (`ALT+Q` brings it back).
 
 Every tool replaces the whole input box and shows a short note above the dock
