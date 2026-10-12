@@ -1,0 +1,8 @@
+{
+  "@context": ["https://www.w3.org/ns/did/v1"],
+  "id": "did:web:localhost%3A8765",
+  "verificationMethod": [
+    { "id": "#key-1", "type": "Multikey", "controller": "did:web:localhost%3A8765", "publicKeyMultibase": "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK" },
+    { "id": "#key-2", "type": "JsonWebKey2020", "controller": "did:web:localhost%3A8765", "publicKeyJwk": { "kty": "EC", "crv": "secp256k1", "x": "demo", "y": "demo" } }
+  ]
+}

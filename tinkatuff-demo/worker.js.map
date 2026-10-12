@@ -1,0 +1,1 @@
+{"version":3,"file":"worker.js","sources":["webpack://demo/./src/worker.ts","webpack://demo/./node_modules/tweetnacl/nacl-fast.js","webpack://demo/./node_modules/node-forge/lib/rsa.js","webpack://demo/./node_modules/@noble/post-quantum/ml-kem.js"],"names":[],"mappings":""}

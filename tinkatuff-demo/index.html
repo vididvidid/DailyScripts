@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tinkatuff demo — patient login</title>
+<!-- loaded from a CDN with no integrity="" attribute: the SRI check flags it -->
+<script src="https://unpkg.com/jsencrypt@3.3.2/bin/jsencrypt.min.js"></script>
+<style>
+  body { font: 15px/1.55 system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; color: #1e293b; }
+  h1 { margin-bottom: 4px; } .sub { color: #64748b; margin-top: 0; }
+  code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; }
+  li { margin: 4px 0; } .tag { font-size: 12px; color: #64748b; }
+  #log { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+  form { margin: 16px 0; display: flex; gap: 8px; }
+</style>
+</head>
+<body>
+<h1>tinkatuff demo</h1>
+<p class="sub">A deliberately badly built "patient portal" on your own machine. Every flaw below is planted on purpose so tinkatuff has something to find.
+Nothing here talks to a real service; the secrets are generated in your browser each time the page loads.</p>
+
+<form onsubmit="return false"><input name="user" placeholder="user"><input type="password" name="password" placeholder="password"></form>
+
+<h3>What is planted</h3>
+<ul>
+  <li>Served over plain HTTP <span class="tag">— broken today</span></li>
+  <li>A private key printed with <code>console.warn</code> <span class="tag">— broken today</span></li>
+  <li>A password saved in <code>localStorage</code> <span class="tag">— broken today</span></li>
+  <li>The password RSA-encrypted with JSEncrypt and POSTed <span class="tag">— recorded now, unlocked later</span></li>
+  <li>ECDH P-256 and RSA-OAEP keys made with WebCrypto; an ECDH private key stored in IndexedDB <span class="tag">— recorded now, unlocked later</span></li>
+  <li>A WebAssembly module with mbedTLS RSA / ECDH symbols; a WebRTC connection <span class="tag">— recorded now, unlocked later</span></li>
+  <li>RS256 / ES256 JWTs in a cookie, in storage and in an <code>Authorization</code> header; an ES256 DPoP proof <span class="tag">— could be faked later</span></li>
+  <li>JWKS, <code>security.txt</code> PGP key and <code>did.json</code> with RSA / Ed25519 / secp256k1 keys <span class="tag">— could be faked later</span></li>
+  <li>Login cookie readable by JavaScript and valid for two years; a refresh token in <code>localStorage</code> <span class="tag">— other weak spots</span></li>
+  <li>A CDN script without SRI; SHA-1 and AES-128 in WebCrypto; a <code>'DES-EDE3-CBC'</code> string in code <span class="tag">— other weak spots</span></li>
+  <li>A worker whose source map lists <code>tweetnacl</code>, <code>node-forge</code> and <code>@noble/post-quantum</code> <span class="tag">— found by the deep scan</span></li>
+</ul>
+<p>Click the tinkatuff button, then <b>Deep scan</b> for the worker, source map, JWKS, <code>security.txt</code>, <code>did.json</code> and IndexedDB checks.
+DNS, email and certificate checks need a real domain, so on <code>localhost</code> they report "nothing found".</p>
+
+<h3>What the page did</h3>
+<div id="log"></div>
+
+<script>
+const log = m => { document.getElementById('log').textContent += m + '\n'; };
+const b64u = s => btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const jwt = (head, body) => `${b64u(JSON.stringify(head))}.${b64u(JSON.stringify(body))}.ZGVtby1zaWduYXR1cmU`;
+const now = Math.floor(Date.now() / 1000);
+const legacyCipher = 'DES-EDE3-CBC';   // the static scan flags this string
+
+(async () => {
+  // tokens: long-lived RS256 in storage and a cookie, ES256 in a header, an ES256 DPoP proof
+  const rs256 = jwt({ alg: 'RS256', typ: 'JWT' }, { iss: 'http://localhost:8765', sub: 'patient-42', iat: now, exp: now + 400 * 86400 });
+  const es256 = jwt({ alg: 'ES256', typ: 'JWT' }, { sub: 'patient-42', iat: now, exp: now + 3600 });
+  const dpop = jwt({ alg: 'ES256', typ: 'dpop+jwt', jwk: { kty: 'EC', crv: 'P-256', x: 'demo', y: 'demo' } }, { htm: 'GET', htu: '/api.json', iat: now });
+  localStorage.setItem('auth_token', rs256);
+  localStorage.setItem('refresh_token', 'rt_' + crypto.randomUUID() + crypto.randomUUID());
+  localStorage.setItem('settings', JSON.stringify({ theme: 'light', user: 'patient-42', password: 'hunter2-demo' }));
+  document.cookie = `session=${rs256}; path=/; max-age=${2 * 365 * 86400}`;
+  log('stored RS256 token, refresh token and a password in localStorage; set a JS-readable 2-year session cookie');
+
+  // WebCrypto: classical key agreement / encryption, plus weak symmetric choices
+  const ecdh = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveKey']);
+  const rsa = await crypto.subtle.generateKey({ name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['encrypt', 'decrypt']);
+  await crypto.subtle.generateKey({ name: 'AES-GCM', length: 128 }, false, ['encrypt']);
+  await crypto.subtle.digest('SHA-1', new TextEncoder().encode('legacy'));
+  const sig = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-384' }, false, ['sign']);
+  log('WebCrypto: ECDH P-256, RSA-OAEP 2048, ECDSA P-384, AES-GCM 128, SHA-1');
+
+  // E2EE-style identity key kept in IndexedDB
+  await new Promise(res => {
+    const r = indexedDB.open('demo-e2ee', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('keys');
+    r.onsuccess = () => {
+      const tx = r.result.transaction('keys', 'readwrite');
+      tx.objectStore('keys').put({ identityKey: ecdh.privateKey, created: Date.now() }, 'me');
+      tx.oncomplete = () => { r.result.close(); res(); };
+    };
+    r.onerror = res;
+  });
+  log('IndexedDB: stored an ECDH P-256 private key');
+
+  // the password, RSA-encrypted in the browser (JSEncrypt if the CDN loaded, random bytes otherwise)
+  const spki = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey('spki', rsa.publicKey))));
+  let cipher;
+  if (window.JSEncrypt) {
+    const enc = new JSEncrypt();
+    enc.setPublicKey(`-----BEGIN PUBLIC KEY-----\n${spki}\n-----END PUBLIC KEY-----`);
+    cipher = enc.encrypt('hunter2-demo');
+  } else {
+    cipher = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(256))));
+  }
+  const x = new XMLHttpRequest();
+  x.open('POST', '/login');
+  x.setRequestHeader('Content-Type', 'application/json');
+  x.send(JSON.stringify({ user: 'patient-42', password: cipher }));
+  log(`POST /login with an RSA-encrypted password (${window.JSEncrypt ? 'JSEncrypt' : 'random 256 bytes'}; the 501 reply is expected)`);
+
+  // API call carrying tokens; the response contains keys
+  await fetch('/api.json', { headers: { Authorization: `Bearer ${es256}`, DPoP: dpop } }).then(r => r.json());
+  log('GET /api.json with a Bearer ES256 token and a DPoP proof');
+
+  // a private key leaked to the console
+  const pkcs8 = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey('pkcs8', rsa.privateKey))));
+  console.warn(`debug: server key\n-----BEGIN PRIVATE KEY-----\n${pkcs8.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`);
+  console.log('session signing key', sig.privateKey);
+  log('console: printed a private key (PEM) and a CryptoKey');
+
+  // a WebAssembly module carrying mbedTLS RSA / ECDH symbol names in a custom section
+  const name = [...new TextEncoder().encode('sym')];
+  const text = [...new TextEncoder().encode('mbedtls_rsa_pkcs1_encrypt mbedtls_ecdh_compute_shared')];
+  const section = [name.length, ...name, ...text];
+  await WebAssembly.compile(new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0, section.length, ...section]));
+  log('WebAssembly: compiled a module with mbedTLS symbols');
+
+  new Worker('worker.js');
+  new RTCPeerConnection();
+  log('started a worker and a WebRTC connection');
+  log('done — open tinkatuff');
+})().catch(e => log('error: ' + e.message));
+</script>
+</body>
+</html>

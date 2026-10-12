@@ -78,13 +78,21 @@
  *               Snapcompact pages open full size in a viewer (actual pixels
  *               or fit, arrow keys between pages, click or Esc to close)
  *               Source dropdowns show a chevron
+ *
+ *  0.6.0        Floating Dock rail is two columns, tools paired by purpose;
+ *               the single-column fisheye hover became a per-button one
+ *               Skills Library (ALT+K): save skills (name, "use when",
+ *               instructions) or import SKILL.md files; a click brings one
+ *               into the chat as a <skill> block in the input box, or as an
+ *               attached .md file. Skills sync through the same gist and
+ *               show as sparkle chips on the Quick Dock
  */
 
 // ==UserScript==
 // @name         ChatGPT / Claude / Copilot / Gemini / Grok AI Chat Exporter by RevivalStack
 // @namespace    [old]https://github.com/revivalstack/chatgpt-exporter
-// @version      3.9.0
-// @description  Export your ChatGPT, Claude, Copilot, Gemini or Grok chat into a properly and elegantly formatted Markdown or JSON. Includes a Gist-synced Prompt Library with a Quick Dock over the site's input box, Text Minifier, JSON→TOON converter and Snapcompact — in one draggable, two-column icon-dock panel.
+// @version      3.10.0
+// @description  Export your ChatGPT, Claude, Copilot, Gemini or Grok chat into a properly and elegantly formatted Markdown or JSON. Includes a Gist-synced Prompt Library and Skills Library with a Quick Dock over the site's input box, Text Minifier, JSON→TOON converter and Snapcompact — in one draggable, two-column icon-dock panel.
 // @author       vididvidid, Mic Mejia (Refactored UI)
 // @license      MIT License
 // @match        https://chat.openai.com/*
@@ -142,7 +150,7 @@
    * 1. CONFIG — constants & persisted-setting keys. No logic lives here.
    * ========================================================================== */
   const Config = {
-    VERSION: "3.9.0",
+    VERSION: "3.10.0",
     DOM_READY_TIMEOUT_MS: 1000,
     AUTOSCROLL_INITIAL_DELAY_MS: 2000,
 
@@ -152,6 +160,9 @@
     // the free-space maths and the restore path all share it, so a saved
     // position round-trips to exactly where it was left.
     PANEL_EDGE_MARGIN: 4,
+    // Distance from the rail's edge to the content column beside it: the
+    // two-column rail's width plus a small gap.
+    PANEL_CONTENT_OFFSET: 100,
     QUICKDOCK_MAX_CHIPS: 12,
 
     DEFAULT_CHAT_TITLE: "chat",
@@ -190,7 +201,8 @@
       PANEL_ACTIVE_SECTION: "aiChatExporter_panelActiveSection",
       CHAT_TITLE_PREFIX: "aiChatExporter_chatTitlePrefix",
       AUTO_SCROLL_ENABLED: "gm_auto_scroll_enabled",
-      PROMPTS: "aiUtil_prompts",
+      PROMPTS: "aiUtil_prompts", // prompts and skills, told apart by .kind
+      SKILL_IMPORT_MODE: "aiUtil_skillImportMode", // "text" | "file"
       GIST_TOKEN: "aiUtil_gistToken",
       GIST_ID: "aiUtil_gistId",
       GIST_LAST_SYNC: "aiUtil_gistLastSync",
@@ -373,12 +385,12 @@
 
                 /* ---------- Icon rail (Fixed dimensions, anchors panel) ---------- */
                 #ai-exporter-rail {
-                    width: 52px;
+                    width: 92px;
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     gap: 0; /* Remove gap to ensure contiguous hit areas */
-                    padding: 8px 6px;
+                    padding: 8px;
                     background: ${t.railGradient};
                     border-radius: 14px;
                     box-shadow: ${t.shadow};
@@ -405,6 +417,15 @@
 
                 .ai-exporter-rail-spacer { flex: 1; min-height: 4px; }
 
+                /* Two columns of tool buttons; the grip and the eye span both. */
+                #ai-exporter-rail-grid {
+                    display: grid;
+                    grid-template-columns: repeat(2, 36px);
+                    grid-auto-rows: 36px;
+                    gap: 4px;
+                    justify-content: center;
+                }
+
                 .ai-exporter-rail-btn {
                     width: 36px;
                     height: 36px;
@@ -427,55 +448,18 @@
                     transition: all 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.1);
                 }
                 
-                /* Fisheye Dock Effect - Gradient Black */
+                /* Hover: the cell stays put (a grid has no single "next" neighbour
+                   to fisheye into), the button darkens and its icon grows. */
                 .ai-exporter-rail-btn:hover {
-                    width: 48px;
-                    height: 48px;
                     z-index: 10;
-                    background-color: rgba(0, 0, 0, 0.85); /* Main focus black */
+                    background-color: rgba(0, 0, 0, 0.85);
                     color: #ffffff;
-                    border-radius: 14px;
-                    border-width: 2px;
+                    border-width: 1px;
                     box-shadow: 0 4px 12px rgba(0,0,0,0.25);
                 }
-                .ai-exporter-rail-btn:hover .rail-icon-emoji { font-size: 20px; }
-                .ai-exporter-rail-btn:hover .rail-icon-text { font-size: 11px; opacity: 1; color: #ffffff; }
-                .ai-exporter-rail-btn:hover .rail-icon-svg { width: 22px; height: 22px; }
-
-                /* Immediate siblings */
-                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover),
-                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn {
-                    width: 42px;
-                    height: 42px;
-                    z-index: 9;
-                    background-color: rgba(0, 0, 0, 0.5); /* Lighter black */
-                    color: #ffffff;
-                    border-radius: 12px;
-                    border-width: 2px;
-                }
-                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover) .rail-icon-emoji,
-                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn .rail-icon-emoji { font-size: 16px; }
-                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover) .rail-icon-text,
-                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn .rail-icon-text { font-size: 10px; color: #ffffff; }
-                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn:hover) .rail-icon-svg,
-                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn .rail-icon-svg { width: 19px; height: 19px; }
-
-                /* 2nd level siblings */
-                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover),
-                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn {
-                    width: 38px;
-                    height: 38px;
-                    z-index: 8;
-                    background-color: rgba(0, 0, 0, 0.25); /* More light black */
-                    border-radius: 10px;
-                    border-width: 2px;
-                }
-                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover) .rail-icon-emoji,
-                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn .rail-icon-emoji { font-size: 14px; }
-                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover) .rail-icon-text,
-                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn .rail-icon-text { font-size: 9px; }
-                .ai-exporter-rail-btn:has(+ .ai-exporter-rail-btn + .ai-exporter-rail-btn:hover) .rail-icon-svg,
-                .ai-exporter-rail-btn:hover + .ai-exporter-rail-btn + .ai-exporter-rail-btn .rail-icon-svg { width: 17px; height: 17px; }
+                .ai-exporter-rail-btn:hover .rail-icon-emoji { font-size: 18px; }
+                .ai-exporter-rail-btn:hover .rail-icon-text { font-size: 10px; opacity: 1; color: #ffffff; }
+                .ai-exporter-rail-btn:hover .rail-icon-svg { width: 20px; height: 20px; }
 
                 .ai-exporter-rail-btn.active {
                     background-color: #000000;
@@ -542,6 +526,17 @@
                     left: calc(100% + 12px);
                 }
                 #${Config.DOM.PANEL_ID}.on-left .ai-exporter-tooltip::after { right: auto; left: -4px; }
+                /* Second-column tooltips clear the first column (36px + 4px gap);
+                   docked on the left, the first column clears the second. */
+                #ai-exporter-rail-grid > .ai-exporter-rail-btn:nth-child(even) .ai-exporter-tooltip {
+                    right: calc(100% + 52px);
+                }
+                #${Config.DOM.PANEL_ID}.on-left #ai-exporter-rail-grid > .ai-exporter-rail-btn:nth-child(even) .ai-exporter-tooltip {
+                    right: auto;
+                }
+                #${Config.DOM.PANEL_ID}.on-left #ai-exporter-rail-grid > .ai-exporter-rail-btn:nth-child(odd) .ai-exporter-tooltip {
+                    left: calc(100% + 52px);
+                }
                 .ai-exporter-rail-btn:hover .ai-exporter-tooltip { display: flex; }
                 .ai-exporter-tooltip .tt-head { display: flex; align-items: center; gap: 6px; }
                 .ai-exporter-tooltip .tt-title { font-size: 12.5px; font-weight: 600; color: #ffffff; letter-spacing: -0.01em; }
@@ -578,6 +573,7 @@
                 }
                 #${Config.DOM.PANEL_ID}.global-collapsed .ai-exporter-rail-btn:not(#ai-exporter-rail-master-eye),
                 #${Config.DOM.PANEL_ID}.global-collapsed #ai-exporter-rail-drag,
+                #${Config.DOM.PANEL_ID}.global-collapsed #ai-exporter-rail-grid,
                 #${Config.DOM.PANEL_ID}.global-collapsed .ai-exporter-rail-spacer {
                     display: none !important;
                 }
@@ -588,7 +584,7 @@
                 /* ---------- Content column (Floating to side of rail) ---------- */
                 #ai-exporter-content {
                     position: absolute;
-                    right: 60px;
+                    right: ${Config.PANEL_CONTENT_OFFSET}px;
                     top: 0;
                     width: min(340px, 88vw);
                     max-height: min(78vh, 620px);
@@ -776,6 +772,8 @@
                     font-size: 12px; font-weight: 700; color: ${t.textLight};
                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
                 }
+                .ai-exporter-prompt-title.with-icon { display: flex; align-items: center; gap: 5px; }
+                .ai-exporter-prompt-title.with-icon svg { flex-shrink: 0; }
                 .ai-exporter-prompt-preview {
                     font-size: 10.5px; color: ${t.textMuted};
                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -896,6 +894,10 @@
                     overflow: hidden; text-overflow: ellipsis;
                 }
                 #${Config.DOM.QUICKDOCK_ID} .qd-chip:hover { background: #000000; color: #ffffff; }
+                #${Config.DOM.QUICKDOCK_ID} .qd-chip.qd-skill {
+                    display: inline-flex; align-items: center; gap: 4px; border-style: dashed;
+                }
+                #${Config.DOM.QUICKDOCK_ID} .qd-chip.qd-skill svg { flex-shrink: 0; }
                 #${Config.DOM.QUICKDOCK_ID} .qd-icon {
                     flex: 0 0 auto;
                     width: 24px; height: 24px; padding: 0;
@@ -1026,6 +1028,11 @@
       bookmarkPlus: [
         "m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z", "M12 7v6", "M15 10H9",
       ],
+      skill: [
+        "M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z",
+        "M20 3v4", "M22 5h-4", "M4 17v2", "M5 18H3",
+      ],
+      upload: ["M12 3v12", "m17 8-5-5-5 5", "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"],
     },
 
     /** @returns {SVGSVGElement} a currentColor stroke icon. */
@@ -2374,6 +2381,8 @@
    * browsers and machines.
    *
    * A prompt is { id, title, body, createdAt, updatedAt, deleted? }.
+   * Skills live in the same list as { ..., kind: "skill", description }, so
+   * they share the gist and its merge; a record with no kind is a prompt.
    * Deletes leave a tombstone (deleted: true) rather than dropping the record,
    * otherwise a pull from an out-of-date gist would resurrect it. Merging is
    * last-write-wins per id, compared on updatedAt.
@@ -2398,10 +2407,10 @@
       return PromptStore._prompts;
     },
 
-    /** Live prompts only (tombstones filtered out), sorted by title. */
-    list() {
+    /** Live records of one kind (tombstones filtered out), sorted by title. */
+    list(kind = "prompt") {
       return PromptStore.load()
-        .filter((p) => p && !p.deleted && p.title)
+        .filter((p) => p && !p.deleted && p.title && (p.kind || "prompt") === kind)
         .sort((a, b) =>
           String(a.title).localeCompare(String(b.title), undefined, {
             sensitivity: "base",
@@ -2430,12 +2439,16 @@
       return () => PromptStore._listeners.delete(fn);
     },
 
-    add(title, body) {
+    /** @param {Object} [extra] e.g. { kind: "skill", description } */
+    add(title, body, extra = {}) {
       const now = new Date().toISOString();
       const prompt = {
         id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-        title: String(title || "").trim() || "Untitled prompt",
+        title:
+          String(title || "").trim() ||
+          (extra.kind === "skill" ? "Untitled skill" : "Untitled prompt"),
         body: String(body || ""),
+        ...extra,
         createdAt: now,
         updatedAt: now,
       };
@@ -2457,6 +2470,7 @@
       if (!prompt) return false;
       prompt.deleted = true;
       prompt.body = "";
+      if (prompt.description) prompt.description = "";
       prompt.updatedAt = new Date().toISOString();
       PromptStore.persist();
       return true;
@@ -2634,6 +2648,105 @@
           total: merged.filter((p) => !p.deleted).length,
         };
       },
+    },
+  };
+
+  /* ==========================================================================
+   * 8b. SKILLS — reusable instruction sets, stored in PromptStore (kind
+   * "skill"), that one click brings into the chat: as a <skill> block typed
+   * into the input box, or as a SKILL.md-style file attached to the message.
+   * ========================================================================== */
+  const Skills = {
+    mode() {
+      return Store.get(Config.GM_KEYS.SKILL_IMPORT_MODE, "text") === "file" ? "file" : "text";
+    },
+
+    setMode(mode) {
+      Store.set(Config.GM_KEYS.SKILL_IMPORT_MODE, mode === "file" ? "file" : "text");
+    },
+
+    slug(title) {
+      return (
+        String(title || "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 64) || "skill"
+      );
+    },
+
+    /** The block typed into the input box. */
+    toText(skill) {
+      const name = String(skill.title).replace(/"/g, "'");
+      const desc = String(skill.description || "").trim();
+      return (
+        `<skill name="${name}">\n` +
+        (desc ? `Use when: ${desc}\n\n` : "") +
+        `${String(skill.body).trim()}\n</skill>\n`
+      );
+    },
+
+    /** SKILL.md layout: YAML front matter (name, description), then the body. */
+    toMarkdown(skill) {
+      const desc = String(skill.description || "").replace(/\s+/g, " ").trim();
+      return (
+        `---\nname: ${Skills.slug(skill.title)}\n` +
+        (desc ? `description: ${JSON.stringify(desc)}\n` : "") +
+        `---\n\n${String(skill.body).trim()}\n`
+      );
+    },
+
+    /**
+     * Reads a SKILL.md (or any text file). Front matter is optional.
+     * @returns {{title: string, description: string, body: string}}
+     */
+    parse(text, fallbackName = "") {
+      const src = String(text || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+      const meta = {};
+      let body = src;
+      const fm = src.match(/^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/);
+      if (fm) {
+        body = src.slice(fm[0].length);
+        fm[1].split("\n").forEach((line) => {
+          const m = line.match(/^([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
+          if (!m) return;
+          let value = m[2].trim();
+          if (/^".*"$/.test(value)) {
+            try {
+              value = JSON.parse(value);
+            } catch (e) {
+              value = value.slice(1, -1);
+            }
+          } else if (/^'.*'$/.test(value)) value = value.slice(1, -1).replace(/''/g, "'");
+          meta[m[1].toLowerCase()] = value;
+        });
+      }
+      return {
+        title: String(meta.name || fallbackName || "").trim(),
+        description: String(meta.description || "").trim(),
+        body: body.trim(),
+      };
+    },
+
+    /**
+     * Brings a skill into the chat in the chosen mode. A file the site will
+     * not take falls back to text, and no input box at all to the clipboard.
+     * @returns {{ok: boolean, message: string}}
+     */
+    importToChat(skill) {
+      const name = Utils.truncate(skill.title, 40);
+      if (Skills.mode() === "file") {
+        const file = new File([Skills.toMarkdown(skill)], `${Skills.slug(skill.title)}.md`, {
+          type: "text/markdown",
+        });
+        if (Composer.attachFiles([file]))
+          return { ok: true, message: `Attached skill "${name}" as ${file.name}` };
+      }
+      const text = Skills.toText(skill);
+      if (Composer.insert(text))
+        return { ok: true, message: `Added skill "${name}" to the input box` };
+      navigator.clipboard.writeText(text).catch(() => {});
+      return { ok: false, message: "No input box found — skill copied to clipboard" };
     },
   };
 
@@ -4148,7 +4261,13 @@
       dots.appendChild(Icons.make("grip", 16));
       rail.appendChild(dots);
 
-      rail.appendChild(
+      // Two columns, paired by purpose: library | skills, MD | JSON, ...
+      // Grid order is row-major, so keep each pair adjacent below.
+      const grid = document.createElement("div");
+      grid.id = "ai-exporter-rail-grid";
+      rail.appendChild(grid);
+
+      grid.appendChild(
         UI.makeRailButton({
           id: "prompts",
           icon: "library",
@@ -4156,7 +4275,15 @@
           onClick: () => UI.showSection("prompts"),
         }),
       );
-      rail.appendChild(
+      grid.appendChild(
+        UI.makeRailButton({
+          id: "skills",
+          icon: "skill",
+          tooltip: { title: "Skills Library", desc: "Save skills and bring one into the chat with a click.", keys: ["Alt", "K"] },
+          onClick: () => UI.showSection("skills"),
+        }),
+      );
+      grid.appendChild(
         UI.makeRailButton({
           id: "export-md",
           icon: "markdown",
@@ -4164,7 +4291,7 @@
           onClick: () => UI.showSection("export-md"),
         }),
       );
-      rail.appendChild(
+      grid.appendChild(
         UI.makeRailButton({
           id: "export-json",
           icon: "json",
@@ -4172,15 +4299,7 @@
           onClick: () => UI.showSection("export-json"),
         }),
       );
-      rail.appendChild(
-        UI.makeRailButton({
-          id: "settings",
-          icon: "sliders",
-          tooltip: { title: "Filename format", desc: "How exported files are named." },
-          onClick: () => UI.showSection("settings"),
-        }),
-      );
-      rail.appendChild(
+      grid.appendChild(
         UI.makeRailButton({
           id: "toon",
           icon: "toon",
@@ -4188,7 +4307,7 @@
           onClick: () => UI.showSection("toon"),
         }),
       );
-      rail.appendChild(
+      grid.appendChild(
         UI.makeRailButton({
           id: "minifier",
           icon: "minify",
@@ -4196,12 +4315,20 @@
           onClick: () => UI.showSection("minifier"),
         }),
       );
-      rail.appendChild(
+      grid.appendChild(
         UI.makeRailButton({
           id: "snapcompact",
           icon: "image",
           tooltip: { title: "Snapcompact", desc: "Render text as dense images." },
           onClick: () => UI.showSection("snapcompact"),
+        }),
+      );
+      grid.appendChild(
+        UI.makeRailButton({
+          id: "settings",
+          icon: "sliders",
+          tooltip: { title: "Filename format", desc: "How exported files are named." },
+          onClick: () => UI.showSection("settings"),
         }),
       );
 
@@ -4213,7 +4340,7 @@
       });
       quickBtn.id = "ai-exporter-rail-quickdock";
       quickBtn.classList.toggle("off", !UI.quickDockEnabled);
-      rail.appendChild(quickBtn);
+      grid.appendChild(quickBtn);
 
       const meterBtn = UI.makeRailButton({
         id: "meter",
@@ -4235,9 +4362,9 @@
             `of ${Utils.formatTokens(m.budget)} tokens.`,
         });
       });
-      rail.appendChild(meterBtn);
+      grid.appendChild(meterBtn);
 
-      rail.appendChild(
+      grid.appendChild(
         UI.makeRailButton({
           id: "handoff",
           icon: "handoff",
@@ -4259,7 +4386,7 @@
         });
         scrollBtn.id = "ai-exporter-rail-scroll";
         scrollBtn.classList.toggle("off", !UI.autoScrollEnabled);
-        rail.appendChild(scrollBtn);
+        grid.appendChild(scrollBtn);
       }
 
       const spacer = document.createElement("div");
@@ -4624,13 +4751,14 @@
       const content = document.getElementById("ai-exporter-content");
       if (!panel || !content) return;
       const rect = panel.getBoundingClientRect();
-      if (rect.left < 360) {
+      const offset = `${Config.PANEL_CONTENT_OFFSET}px`;
+      if (rect.left < 300 + Config.PANEL_CONTENT_OFFSET) {
         content.style.right = "auto";
-        content.style.left = "60px";
+        content.style.left = offset;
         panel.classList.add("on-left");
       } else {
         content.style.left = "auto";
-        content.style.right = "60px";
+        content.style.right = offset;
         panel.classList.remove("on-left");
       }
     },
@@ -4724,6 +4852,7 @@
       UI._sections = {};
       UI._sourcePickers = [];
       UI.sections.registerPromptsSection();
+      UI.sections.registerSkillsSection();
       UI.sections.registerExportSections();
       UI.sections.registerSettingsSection();
       UI.sections.registerMinifierSection();
@@ -5185,7 +5314,43 @@
        * "+" form saves a new prompt; the gist panel mirrors everything to a
        * secret gist so the library follows you between machines.
        */
+      /** Labels and behaviour that differ between the two libraries. */
+      LIBRARIES: {
+        prompt: {
+          id: "prompts",
+          title: "Prompt library",
+          noun: "prompt",
+          titlePlaceholder: "e.g. Code review checklist",
+          bodyLabel: "Prompt:",
+          bodyPlaceholder: "Paste your prompt here…",
+          mainTip: "Insert into the chat input box",
+        },
+        skill: {
+          id: "skills",
+          title: "Skills library",
+          noun: "skill",
+          titlePlaceholder: "e.g. Code reviewer",
+          bodyLabel: "Instructions:",
+          bodyPlaceholder: "What the model should do when this skill is in play — steps, rules, output format…",
+          mainTip: "Bring this skill into the chat",
+        },
+      },
+
       registerPromptsSection() {
+        UI.sections.registerLibrarySection("prompt");
+      },
+
+      registerSkillsSection() {
+        UI.sections.registerLibrarySection("skill");
+      },
+
+      /**
+       * The Prompt and Skills libraries: one list UI over PromptStore, filtered
+       * by kind. Both share the gist settings, since they sync to one gist.
+       */
+      registerLibrarySection(kind) {
+        const spec = UI.sections.LIBRARIES[kind];
+        const isSkill = kind === "skill";
         const wrap = document.createElement("div");
         wrap.style.display = "flex";
         wrap.style.flexDirection = "column";
@@ -5195,13 +5360,53 @@
         topRow.className = "ai-exporter-btn-row";
         const newBtn = document.createElement("button");
         newBtn.className = "ai-exporter-btn";
-        newBtn.textContent = "+ New prompt";
+        newBtn.textContent = `+ New ${spec.noun}`;
         const syncBtn = document.createElement("button");
         syncBtn.className = "ai-exporter-btn secondary";
         syncBtn.textContent = "Sync gist";
         topRow.appendChild(newBtn);
+        // Skills are often shared as SKILL.md files; read one straight in.
+        const fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.accept = ".md,.markdown,.txt,text/markdown,text/plain";
+        fileInput.multiple = true;
+        fileInput.hidden = true;
+        const importBtn = document.createElement("button");
+        importBtn.className = "ai-exporter-btn secondary";
+        importBtn.textContent = "Import .md";
+        importBtn.title = "Add skills from SKILL.md files (name / description front matter is read)";
+        if (isSkill) {
+          topRow.appendChild(importBtn);
+          wrap.appendChild(fileInput);
+        }
         topRow.appendChild(syncBtn);
         wrap.appendChild(topRow);
+
+        /* ---- how a skill enters the chat ---- */
+        const modeSelect = document.createElement("select");
+        if (isSkill) {
+          const modeRow = document.createElement("label");
+          modeRow.className = "ai-exporter-section-label";
+          modeRow.style.display = "flex";
+          modeRow.style.alignItems = "center";
+          modeRow.style.gap = "6px";
+          modeRow.textContent = "On click:";
+          [
+            ["text", "Type it into the input box"],
+            ["file", "Attach it as a .md file"],
+          ].forEach(([value, label]) => {
+            const opt = document.createElement("option");
+            opt.value = value;
+            opt.textContent = label;
+            modeSelect.appendChild(opt);
+          });
+          modeSelect.value = Skills.mode();
+          modeSelect.onchange = () => Skills.setMode(modeSelect.value);
+          const modeBox = UI.wrapSelect(modeSelect);
+          modeBox.style.flex = "1";
+          modeRow.appendChild(modeBox);
+          wrap.appendChild(modeRow);
+        }
 
         /* ---- add / edit form ---- */
         const form = document.createElement("div");
@@ -5209,19 +5414,29 @@
         form.hidden = true;
         const titleLabel = document.createElement("label");
         titleLabel.className = "ai-exporter-section-label";
-        titleLabel.textContent = "Title:";
+        titleLabel.textContent = isSkill ? "Name:" : "Title:";
         form.appendChild(titleLabel);
         const titleInput = document.createElement("input");
         titleInput.type = "text";
-        titleInput.placeholder = "e.g. Code review checklist";
+        titleInput.placeholder = spec.titlePlaceholder;
         form.appendChild(titleInput);
+        const descInput = document.createElement("input");
+        descInput.type = "text";
+        descInput.placeholder = "e.g. reviewing a diff or pull request";
+        if (isSkill) {
+          const descLabel = document.createElement("label");
+          descLabel.className = "ai-exporter-section-label";
+          descLabel.textContent = "Use when (optional):";
+          form.appendChild(descLabel);
+          form.appendChild(descInput);
+        }
         const bodyLabel = document.createElement("label");
         bodyLabel.className = "ai-exporter-section-label";
-        bodyLabel.textContent = "Prompt:";
+        bodyLabel.textContent = spec.bodyLabel;
         form.appendChild(bodyLabel);
         const bodyInput = document.createElement("textarea");
-        bodyInput.style.height = "110px";
-        bodyInput.placeholder = "Paste your prompt here…";
+        bodyInput.style.height = isSkill ? "140px" : "110px";
+        bodyInput.placeholder = spec.bodyPlaceholder;
         form.appendChild(bodyInput);
         const formRow = document.createElement("div");
         formRow.className = "ai-exporter-btn-row";
@@ -5238,7 +5453,7 @@
 
         const filterInput = document.createElement("input");
         filterInput.type = "text";
-        filterInput.placeholder = "Filter prompts…";
+        filterInput.placeholder = `Filter ${spec.noun}s…`;
         wrap.appendChild(filterInput);
 
         const list = document.createElement("div");
@@ -5311,9 +5526,10 @@
         const openForm = (prompt) => {
           editingId = prompt ? prompt.id : null;
           titleInput.value = prompt ? prompt.title : "";
+          descInput.value = prompt ? prompt.description || "" : "";
           bodyInput.value = prompt ? prompt.body : "";
           form.hidden = false;
-          newBtn.textContent = prompt ? "Editing…" : "+ New prompt";
+          newBtn.textContent = prompt ? "Editing…" : `+ New ${spec.noun}`;
           titleInput.focus();
         };
 
@@ -5321,11 +5537,13 @@
           editingId = null;
           form.hidden = true;
           titleInput.value = "";
+          descInput.value = "";
           bodyInput.value = "";
-          newBtn.textContent = "+ New prompt";
+          newBtn.textContent = `+ New ${spec.noun}`;
         };
 
         const insertPrompt = (prompt) => {
+          if (isSkill) return setStatus(`${Skills.importToChat(prompt).message}.`);
           if (Composer.insert(prompt.body)) {
             setStatus(`Inserted "${Utils.truncate(prompt.title, 40)}".`);
             return;
@@ -5341,10 +5559,11 @@
         const renderList = () => {
           while (list.firstChild) list.removeChild(list.firstChild);
           const needle = filterInput.value.trim().toLowerCase();
-          const prompts = PromptStore.list().filter(
+          const prompts = PromptStore.list(kind).filter(
             (p) =>
               !needle ||
               p.title.toLowerCase().includes(needle) ||
+              String(p.description || "").toLowerCase().includes(needle) ||
               p.body.toLowerCase().includes(needle),
           );
 
@@ -5352,8 +5571,10 @@
             const empty = document.createElement("div");
             empty.className = "ai-exporter-empty-note";
             empty.textContent = needle
-              ? "No prompt matches that filter."
-              : "No prompts yet — press “+ New prompt” to save one.";
+              ? `No ${spec.noun} matches that filter.`
+              : isSkill
+                ? "No skills yet — press “+ New skill” or import a SKILL.md."
+                : "No prompts yet — press “+ New prompt” to save one.";
             list.appendChild(empty);
             return;
           }
@@ -5364,16 +5585,20 @@
 
             const main = document.createElement("button");
             main.className = "ai-exporter-prompt-main";
-            main.title = "Insert into the chat input box";
+            main.title = spec.mainTip;
             const titleEl = document.createElement("div");
             titleEl.className = "ai-exporter-prompt-title";
             titleEl.textContent = prompt.title;
             const previewEl = document.createElement("div");
             previewEl.className = "ai-exporter-prompt-preview";
             previewEl.textContent = Utils.truncate(
-              prompt.body.replace(/\s+/g, " ").trim(),
+              (prompt.description || prompt.body).replace(/\s+/g, " ").trim(),
               60,
             );
+            if (isSkill) {
+              titleEl.prepend(Icons.make("skill", 11));
+              titleEl.classList.add("with-icon");
+            }
             main.appendChild(titleEl);
             main.appendChild(previewEl);
             main.onclick = () => insertPrompt(prompt);
@@ -5382,12 +5607,12 @@
             const actions = document.createElement("div");
             actions.className = "ai-exporter-prompt-actions";
             [
-              ["copy", "Copy prompt", () =>
+              [`copy`, `Copy ${spec.noun}`, () =>
                 navigator.clipboard
-                  .writeText(prompt.body)
+                  .writeText(isSkill ? Skills.toMarkdown(prompt) : prompt.body)
                   .then(() => setStatus("Copied to clipboard."))],
-              ["edit", "Edit prompt", () => openForm(prompt)],
-              ["trash", "Delete prompt", () => {
+              ["edit", `Edit ${spec.noun}`, () => openForm(prompt)],
+              ["trash", `Delete ${spec.noun}`, () => {
                 if (!confirm(`Delete "${prompt.title}"?`)) return;
                 PromptStore.remove(prompt.id);
                 setStatus("Deleted. Press “Sync gist” to mirror the change.");
@@ -5415,12 +5640,40 @@
         saveBtn.onclick = () => {
           const title = titleInput.value.trim();
           const body = bodyInput.value;
-          if (!title) return alert("Give the prompt a title.");
-          if (!body.trim()) return alert("The prompt body is empty.");
-          if (editingId) PromptStore.update(editingId, { title, body });
-          else PromptStore.add(title, body);
-          setStatus(editingId ? "Prompt updated." : "Prompt saved.");
+          if (!title) return alert(`Give the ${spec.noun} a ${isSkill ? "name" : "title"}.`);
+          if (!body.trim()) return alert(`The ${spec.noun} is empty.`);
+          const fields = isSkill
+            ? { title, body, kind, description: descInput.value.trim() }
+            : { title, body };
+          if (editingId) PromptStore.update(editingId, fields);
+          else PromptStore.add(title, body, isSkill ? fields : {});
+          setStatus(`${isSkill ? "Skill" : "Prompt"} ${editingId ? "updated" : "saved"}.`);
           closeForm();
+        };
+
+        importBtn.onclick = () => fileInput.click();
+        fileInput.onchange = async () => {
+          const files = [...fileInput.files];
+          fileInput.value = "";
+          let added = 0;
+          for (const file of files) {
+            try {
+              const parsed = Skills.parse(await file.text(), file.name.replace(/\.[^.]+$/, ""));
+              // A bare SKILL.md has no useful filename; the folder is not sent.
+              if (!parsed.body) continue;
+              PromptStore.add(parsed.title || "Imported skill", parsed.body, {
+                kind,
+                description: parsed.description,
+              });
+              added++;
+            } catch (e) {
+              /* unreadable file — skipped, counted below */
+            }
+          }
+          setStatus(
+            `Imported ${added} skill(s)` +
+              (added < files.length ? `, skipped ${files.length - added} empty or unreadable.` : "."),
+          );
         };
 
         gistToggle.onclick = () => {
@@ -5471,7 +5724,7 @@
           try {
             const res = await PromptStore.gist.sync();
             setStatus(
-              `Synced — ${res.total} prompt(s); ${res.added} new, ${res.updated} updated from gist.`,
+              `Synced — ${res.total} prompt(s) and skill(s); ${res.added} new, ${res.updated} updated from gist.`,
             );
           } catch (e) {
             setStatus(`Sync failed — ${e.message}`);
@@ -5484,20 +5737,22 @@
         // Keep the list (and the QuickDock) in step with every store change.
         PromptStore.subscribe(() => {
           renderList();
-          QuickDock.render();
+          if (!isSkill) QuickDock.render();
         });
 
         // Entry point for the Quick Dock's "+". showSection() toggles, so only
         // call it when the section is not already the open one.
-        UI._openNewPromptForm = () => {
-          if (UI._activeSectionId !== "prompts") UI.showSection("prompts");
-          openForm(null);
-        };
+        if (!isSkill)
+          UI._openNewPromptForm = () => {
+            if (UI._activeSectionId !== "prompts") UI.showSection("prompts");
+            openForm(null);
+          };
 
-        UI._sections["prompts"] = {
-          title: "Prompt library",
+        UI._sections[spec.id] = {
+          title: spec.title,
           body: wrap,
           onShow: () => {
+            if (isSkill) modeSelect.value = Skills.mode();
             renderList();
             const last = PromptStore.gist.lastSync();
             if (last && !status.textContent)
@@ -6523,6 +6778,10 @@
           e.preventDefault();
           UI.showSection("prompts");
         }
+        if (e.altKey && e.code === "KeyK") {
+          e.preventDefault();
+          UI.showSection("skills");
+        }
         if (e.altKey && e.code === "KeyQ") {
           e.preventDefault();
           UI.toggleQuickDock();
@@ -6798,6 +7057,9 @@
         QuickDock.makeIcon("library", "Open the prompt library", () =>
           UI.showSection("prompts"),
         ),
+        QuickDock.makeIcon("skill", "Open the skills library", () =>
+          UI.showSection("skills"),
+        ),
         QuickDock.makeIcon("close", "Hide the Quick Dock (ALT+Q to bring it back)", () =>
           UI.toggleQuickDock(),
         ),
@@ -6828,14 +7090,18 @@
       return bar;
     },
 
-    /** Rebuilds the chip row from the current prompt library. */
+    /** Rebuilds the chip row: prompts first, then skills (marked with a sparkle). */
     render() {
       if (!QuickDock._scroll) return;
       const scroll = QuickDock._scroll;
       while (scroll.firstChild) scroll.removeChild(scroll.firstChild);
 
       const prompts = PromptStore.list().slice(0, Config.QUICKDOCK_MAX_CHIPS);
-      if (!prompts.length) {
+      const skills = PromptStore.list("skill").slice(
+        0,
+        Math.max(0, Config.QUICKDOCK_MAX_CHIPS - prompts.length),
+      );
+      if (!prompts.length && !skills.length) {
         const note = document.createElement("span");
         note.className = "qd-empty";
         note.textContent = "No saved prompts — type one in the box and press the bookmark icon";
@@ -6856,6 +7122,22 @@
             chip.textContent = "Copied — no input box";
             setTimeout(() => (chip.textContent = prompt.title), 1500);
           }
+        };
+        scroll.appendChild(chip);
+      });
+
+      skills.forEach((skill) => {
+        const chip = document.createElement("button");
+        chip.className = "qd-chip qd-skill";
+        chip.append(Icons.make("skill", 11), document.createTextNode(skill.title));
+        chip.title = `Skill — ${Utils.truncate(
+          (skill.description || skill.body).replace(/\s+/g, " ").trim(),
+          200,
+        )}`;
+        chip.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          QuickDock.flash(Skills.importToChat(skill).message);
         };
         scroll.appendChild(chip);
       });
