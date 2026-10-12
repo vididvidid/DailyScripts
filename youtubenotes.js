@@ -5,6 +5,10 @@
  *
  * versions:
  *
+ * 0.5.5          thumbnails wearing YouTube's red resume bar are marked
+ *                watched on sight — catches videos watched on another
+ *                device that the history walk never reached
+ *
  * 0.5.4          no longer runs a second time inside the live chat iframe
  *                (duplicate ⇅ button and doubled sync timers on streams
  *                and premieres with chat replay)
@@ -172,6 +176,11 @@
     maxAuthUserProbe: 3,
     // Also harvest ids straight off /feed/history when you visit it.
     harvestDom: true,
+    // YouTube paints a red resume bar on any thumbnail you have started,
+    // on any device. That bar is server truth, so any thumbnail wearing
+    // one gets marked watched even if the history walk never reached it
+    // (paused history, older than the baseline, incremental stop).
+    harvestResumeBars: true,
     showToasts: true,
     // YouTube's hover preview plays inside the thumbnail, in its own
     // layer above our overlay — so a watched video starts playing behind
@@ -938,8 +947,44 @@
     updateThumbnailOverlay(anchor, info.id);
   }
 
+  // Old renderer: ytd-thumbnail-overlay-resume-playback-renderer #progress.
+  // New view models: yt-thumbnail-overlay-progress-bar-view-model, whose
+  // watched segment carries the width. Both are inside the thumbnail link.
+  const RESUME_BAR_SELECTOR = [
+    'ytd-thumbnail-overlay-resume-playback-renderer #progress',
+    '[class*="WatchedProgressBarSegment"]',
+    '[class*="ResumePlaybackProgressBar"]'
+  ].join(', ');
+
+  function resumeBarPercent(anchor) {
+    const bar = anchor.querySelector(RESUME_BAR_SELECTOR);
+    if (!bar) return null;
+    const pct = parseFloat(bar.style && bar.style.width);
+    return Number.isFinite(pct) ? pct : null;
+  }
+
+  function harvestResumeBars(anchors) {
+    if (!HISTORY_SYNC.harvestResumeBars) return;
+    const current = getCurrentPageVideo();
+    const items = [];
+    const seen = new Set();
+    for (const anchor of anchors) {
+      const id = anchor.getAttribute('data-ytnotes-video-id');
+      if (!id || seen.has(id) || Store.isWatched(id)) continue;
+      if (current && current.id === id) continue;
+      const pct = resumeBarPercent(anchor);
+      if (pct === null || pct <= 0 || pct < HISTORY_SYNC.minWatchPercent) continue;
+      seen.add(id);
+      items.push({ id: id, type: anchor.getAttribute('href').indexOf('/shorts') === 0 ? 'short' : 'video' });
+    }
+    // Bulk change repaints every thumbnail, these ones now with the ❌.
+    if (items.length) Store.markWatchedBulk(items, 'history');
+  }
+
   function processAllThumbnails(root) {
-    deepQueryAll(root, THUMBNAIL_LINK_SELECTOR).forEach(processAnchor);
+    const anchors = deepQueryAll(root, THUMBNAIL_LINK_SELECTOR);
+    anchors.forEach(processAnchor);
+    harvestResumeBars(anchors);
   }
 
   const scheduleThumbnailScan = debounce(() => processAllThumbnails(), SCAN_DEBOUNCE_MS);
