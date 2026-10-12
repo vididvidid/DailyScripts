@@ -25,6 +25,14 @@ one question when you leave them — what was that, and why did you watch it —
 behind a deliberate three-second pause, with the buttons moved every time so it
 never becomes muscle memory.
 
+### 3. WhatsApp Rotate (`whatsappRotate.js`)
+WhatsApp Web's image viewer has no rotate button. This adds rotate left / right
+buttons to the viewer's top toolbar, plus `R` / `Shift+R` shortcuts. A photo
+taken sideways is scaled up to fill the viewer once it's turned, and each photo
+keeps its rotation while you page through the album. Zoom still works on a
+rotated photo. The file has its own `==UserScript==` header, so you can paste it
+straight into Tampermonkey or load it through the `template.js` stub.
+
 ### 4. tinkatuff (`tinkatuff.js`)
 A quantum-exposure scanner for any live website. A small floating button
 (drag it anywhere — the spot is remembered) grades the site A–F on what a
