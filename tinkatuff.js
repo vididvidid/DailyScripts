@@ -5,6 +5,12 @@
  *
  * versions:
  *
+ * 0.4.2          the SRI check skips CAPTCHA widgets (reCAPTCHA, hCaptcha,
+ *                Cloudflare Turnstile / challenges, Arkose, GeeTest, …) —
+ *                they can't carry a fixed hash and must not be self-hosted —
+ *                and lists them as an info line instead of a weak spot;
+ *                clicking anywhere outside the report closes it
+ *
  * 0.4.1          "Copy for AI" button — copies the whole result as a ready
  *                prompt (instructions + every finding, grouped, with where
  *                and suggested fixes + the crypto inventory) to paste into
@@ -128,7 +134,7 @@
 // ==UserScript==
 // @name         tinkatuff – quantum exposure scanner
 // @namespace    https://github.com/vididvidid/aiutils
-// @version      0.4.1
+// @version      0.4.2
 // @description  Finds what on a website a future quantum computer could break: TLS, certs, tokens, network, console, WebCrypto, WASM, passkeys, DNSSEC, DKIM
 // @author       vididvidid
 // @match        *://*/*
@@ -150,7 +156,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.4.1';
+  const VERSION = '0.4.2';
   const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const HAS_GM_XHR = typeof GM_xmlhttpRequest === 'function';
   const nativeLog = console.log.bind(console);
@@ -1419,17 +1425,28 @@
   }
 
   // Third-party scripts / stylesheets without Subresource Integrity.
+  // CAPTCHA widgets are left out: their providers change the files without
+  // notice (no fixed version to pin a hash to) and self-hosting breaks them,
+  // so they are only mentioned, not counted as a weak spot.
+  const CAPTCHA_SRC = /(?:google\.com|recaptcha\.net|gstatic\.com)\/recaptcha\/|hcaptcha\.com|challenges\.cloudflare\.com|arkoselabs\.com|funcaptcha\.com|geetest\.com|friendlycaptcha\.(?:com|eu)|mtcaptcha\.com|captcha\.awswaf\.com|captcha-delivery\.com|yandex\.(?:ru|com)\/(?:smart-)?captcha|smartcaptcha\.yandexcloud\.net|captcha\.px-cdn\.net|perimeterx\.net/i;
   function checkSri() {
     const els = [...document.querySelectorAll('script[src], link[rel~="stylesheet"][href], link[rel="modulepreload"][href]')];
     const third = els.filter(e => { try { return new URL(e.src || e.href, location.href).origin !== location.origin; } catch (_) { return false; } });
-    const missing = third.filter(e => !e.integrity).map(e => e.src || e.href);
+    const captcha = third.filter(e => CAPTCHA_SRC.test(e.src || e.href));
+    const checked = third.filter(e => !captcha.includes(e));
+    const missing = checked.filter(e => !e.integrity).map(e => e.src || e.href);
     const out = [];
     if (missing.length) out.push(F('web', 'low', `${missing.length} third-party script/style file(s) without an integrity check (SRI)`, {
       plain: 'Some code is loaded from other servers without a fingerprint check — if one of those servers is hacked, this site runs whatever it serves.',
       why: WHY.hygiene, fix: 'Add integrity="sha384-…" crossorigin="anonymous" to fixed-version CDN files, or self-host them.', where: missing,
     }));
-    if (third.length && !missing.length) out.push(F('web', 'pass', `All ${third.length} third-party script/style file(s) are integrity-checked`, {
+    if (checked.length && !missing.length) out.push(F('web', 'pass', `All ${checked.length} third-party script/style file(s) are integrity-checked`, {
       plain: 'Code loaded from other servers is fingerprint-checked (SRI).',
+    }));
+    if (captcha.length) out.push(F('web', 'info', `${captcha.length} CAPTCHA file(s) loaded from the provider — skipped in the SRI check`, {
+      plain: 'The CAPTCHA is loaded from its provider\'s servers. It can\'t be fingerprint-checked because the provider updates it without notice, and hosting a copy yourself would break it and miss its security fixes — so this is expected, not a weak spot.',
+      detail: 'The site trusts the CAPTCHA provider to run code on this page. Keep the page\'s CSP limited to that provider\'s domains.',
+      where: captcha.map(e => e.src || e.href),
     }));
     return out;
   }
@@ -2510,6 +2527,8 @@
     document.documentElement.append(ui.host);
     applyTheme();
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && ui.open) toggle(false); }, true);
+    // A click anywhere outside the badge / panel closes the report (closed shadow root: the host is still in the path)
+    document.addEventListener('pointerdown', e => { if (ui.open && !e.composedPath().includes(ui.host)) toggle(false); }, true);
     window.addEventListener('resize', () => restoreBadge());
   }
 
