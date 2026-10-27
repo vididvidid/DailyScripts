@@ -1,13 +1,28 @@
 /*
  * File: template.js
- * Author: vididvidid 
+ * Author: vididvidid
  * Created: 2026-07-27 22:57:32
  *
- * Pre-requisite:
- * - in chrome://extensions -> go to tampermonkey -> allow access to file URIs
- * - tampermonkey extension -> dashboard -> setting 
- *                -> config mode = advanced
- *                -> externals = always
+ * Starting point for a new script, and the live-reload workflow for working on the
+ * scripts in this repo.
+ *
+ * Live reload in Moss (no stub needed):
+ * - Every script in this repo carries its own header, so there is nothing to paste
+ *   here. In the Moss dashboard: + Script (or open the script), then
+ *   Options → Source → "Link a local file…" and pick the file — on Windows Chrome
+ *   that can be \\wsl.localhost\Ubuntu\home\kali\DailyScripts\youtubenotes.js.
+ * - Moss reloads the script every time you save the file, while a Moss page (the
+ *   dashboard) is open. After a browser restart, click Reconnect once.
+ * - To track the published version instead: Import… → paste the GitHub link, with
+ *   auto-update on.
+ *
+ * Live reload in Tampermonkey (the old way):
+ * - chrome://extensions → Tampermonkey → allow access to file URLs, and in its
+ *   dashboard → Settings → Config mode = Advanced → Externals = Always.
+ * - Add a line under @match:
+ *       // @require  file:////wsl.localhost/Ubuntu/home/kali/DailyScripts/[FILE_NAME].js
+ *   and keep this file's body empty. (Moss can't read file:// URLs — use the
+ *   local-file link above there.)
  *
  * Notes on the grants below:
  * - GM_xmlhttpRequest + @connect api.github.com are what let AiUtil.js sync the
@@ -21,16 +36,18 @@
  * - GM_setValue/GM_getValue are where the GitHub token is kept. Without them it
  *   falls back to localStorage, where any script on the page could read it.
  * - Drop these lines only if you use neither gist sync.
+ * - @sandbox: leave it out to run sandboxed (safest). Use @sandbox JavaScript
+ *   when the script must see the page's own variables through unsafeWindow, as
+ *   youtubenotes.js does — in Moss the GM_* functions still work there.
  */
 
 // ==UserScript==
-// @name         [DEV STUB] [SCRIPT_NAME]
+// @name         [SCRIPT_NAME]
 // @namespace    https://github.com/vididvidid/aiutils
 // @version      0.1.0
-// @description  Live-reloading local dev stub linked to WSL repository
+// @description  [What it does]
 // @author       vididvidid
 // @match        https://[TARGET_WEBSITE]/*
-// @require      file:////wsl.localhost/Ubuntu/home/kali/aiutils/[FILE_NAME].js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
@@ -43,4 +60,8 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-// This stub remains empty. All logic executes from the @require file in WSL.
+(function () {
+  'use strict';
+
+  // Your script here.
+})();

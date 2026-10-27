@@ -5,6 +5,14 @@
  *
  * versions:
  *
+ * 0.2.2          Lite no longer breaks sites that ship their own bootstrap
+ *                code as data: scripts (WhatsApp Web: "__d is not defined").
+ *                Showed up once monk really ran at document-start (Moss);
+ *                a late start used to miss those scripts
+ *
+ * 0.2.1         ?monk=lite / static / off in a URL loads that one page in
+ *                that mode (gmailOtp.js uses it to open Gmail light)
+ *
  * 0.2.0          Lite runs only the site's own JavaScript: third-party
  *                scripts (ads, analytics, trackers, chat widgets) are
  *                blocked; library CDNs, captchas, sign-in and payment still
@@ -74,7 +82,7 @@
 // ==UserScript==
 // @name         monk – minimal web
 // @namespace    https://github.com/vididvidid/aiutils
-// @version      0.2.0
+// @version      0.2.2
 // @description  Loads any website the minimal way for slow internet: Lite (no images/video/fonts) or Static (no JS/CSS, like Gmail's old basic HTML)
 // @author       vididvidid
 // @match        *://*/*
@@ -201,6 +209,10 @@
     once = JSON.parse(sessionStorage.getItem(ONCE_KEY));
     sessionStorage.removeItem(ONCE_KEY);
   } catch {}
+  // ?monk=lite / static / off in the URL: that mode for this load only. Lets
+  // other scripts (gmailOtp.js opening Gmail) ask for a light page.
+  const urlMode = new URLSearchParams(location.search).get('monk');
+  if (!once && /^(off|lite|static)$/.test(urlMode || '')) once = { mode: urlMode };
 
   const cfg = siteCfg();
   const chosen = (once && once.mode) || (cfg.mode !== 'default' ? cfg.mode : store.def);
@@ -225,7 +237,9 @@
     if (!allow.frame) d.push(mode === 'static' ? "frame-src 'none'" : "frame-src 'self' " + FRAME_OK.join(' '));
     if (mode === 'lite' && !allow.script) {
       const own = [site, ...(SIBLINGS[site] || [])].flatMap(d => [`https://${d}`, `https://*.${d}`]);
-      d.push(["script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:", ...own, ...SCRIPT_OK].join(' '));
+      // data: and blob: scripts can only be added by scripts already allowed —
+      // the site's own — and some sites ship their bootstrap that way.
+      d.push(["script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data:", ...own, ...SCRIPT_OK].join(' '));
     }
     return d.join('; ');
   }
