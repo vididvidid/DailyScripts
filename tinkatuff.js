@@ -127,8 +127,10 @@
  * source line of every log. Turn it off from the menu while debugging.
  *
  * Install: the file carries its own ==UserScript== header — paste it into
- * Tampermonkey, or load it through template.js with @run-at document-start
- * and the grants below (the hooks must be in before the page's own scripts).
+ * Moss or Tampermonkey as is. It must run in the page (@sandbox JavaScript) at
+ * document-start: the hooks have to be in before the page's own scripts. Moss
+ * starts it before them and still provides GM_xmlhttpRequest, GM_setValue and
+ * the menu in page mode. For live reload while editing it, see template.js.
  */
 
 // ==UserScript==

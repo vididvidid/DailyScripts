@@ -110,6 +110,8 @@ corner (or `Alt+Shift+M`) opens the settings; each site remembers its own mode.
 - **Auto** (as the default) picks Static on 2G / data-saver, Lite on 3G and Off
   on anything faster. **Full page once** opens the current page normally,
   one time.
+- **`?monk=lite`** (or `static` / `off`) in any URL loads that one page in that
+  mode — other scripts use it to open a page light.
 
 It works by adding a Content-Security-Policy `<meta>` at `document-start`, so
 the browser itself refuses the blocked downloads. It can only make a site
@@ -122,28 +124,88 @@ header needs `@run-at document-start` and `@connect *` (for click-to-load
 images), so paste it straight into Tampermonkey or give the `template.js` stub
 the same lines.
 
+### 6. Gmail OTP autofill (`gmailOtp.js`)
+Fills in email OTP codes without an API or token — it uses the Gmail you are
+already signed in to in the same browser. When a page shows an OTP box (a
+`one-time-code` field, a row of single-digit boxes, or a code/OTP field next
+to "verification code" text) and says the code went to your email, it reads
+Gmail's Atom feed (your unread inbox as a small XML list) every 2 seconds and
+picks the code out of the newest mail that arrived after the page appeared —
+usually in about a second, with no tab. Only if the feed fails, or no preview
+has a code after 20 seconds, does it open Gmail in a tab (in front — Chrome
+won't draw Gmail in a hidden tab), open the mail there, and close the tab
+again, landing you back on your page. That tab opens as `?monk=lite`, so with
+monk installed Gmail loads without images, fonts or third-party scripts.
+*Experimental* (Tampermonkey menu → "Gmail beside the page"): instead of a
+tab, Gmail opens in a narrow window beside your page, so you never leave it
+(browsers' own split view can't be opened by a script; if the popup is
+blocked, a button opens it with one click). If the page mentions SMS or isn't sure, a **📩 Get code from Gmail**
+button waits for your click instead.
+
+The code is filled automatically only when the mail came from the site's own
+domain; from anyone else it shows the code with a warning and **Fill / Copy**
+buttons, so a look-alike phishing page never gets your real code without a
+click. A code is never handed out twice, mail older than the OTP box doesn't
+count, and a Gmail conversation is opened so only its newest mail is read.
+Split boxes are filled by pasting, then by typing digit by digit, and read
+back — "Filled" means the boxes really hold the code. If the page clears them
+(wrong code, resend), it offers to fetch the new one. It never submits the form. The Tampermonkey menu turns auto-fetch and
+auto-fill off, or picks another signed-in Gmail account (`u/1`, …).
+
+### 7. Fire button (`fireButton.js`)
+DuckDuckGo's Fire button for any Chromium browser. Two commands in the toolbar
+popup: **🔥 Burn this tab** closes the tab you're on and wipes that site's
+cookies, storage, cache and history entries; **🔥 Burn all** closes every tab
+and wipes all browsing data (history, downloads list, cookies, cache, site
+storage, form data), leaving one fresh tab. Needs **Moss** rather than
+Tampermonkey: it's a background script that uses the browser's own
+`browsingData`, `history` and `tabs` APIs, which Tampermonkey scripts can't reach.
+Paste the file into Moss (**+ Script**) and accept the permissions it asks for.
+
 ## Installation
 
-These scripts run using the [Tampermonkey](https://www.tampermonkey.net/) browser extension. Because these scripts load their code locally from your computer (using `@require`), you need to configure Tampermonkey to allow local file access.
+Every script carries its own `==UserScript==` header, so each file installs as it is.
+They run in [Moss](https://github.com/vididvidid/Moss) (my own userscript manager) or in
+[Tampermonkey](https://www.tampermonkey.net/). `fireButton.js` needs Moss.
 
-### Tampermonkey Setup Guide
+### Moss (recommended)
 
-1. **Install Tampermonkey:** Get the extension for your browser.
-2. **Allow File URL Access (Crucial for Chrome/Edge):**
-   - Go to your browser's Extension Settings (e.g., `chrome://extensions/`).
-   - Find **Tampermonkey** and click **Details**.
-   - Turn ON **Allow access to file URLs**.
-3. **Enable Advanced Settings in Tampermonkey:**
-   - Click the Tampermonkey extension icon and open the **Dashboard**.
-   - Go to the **Settings** tab.
-   - Under the **General** section, change **Config mode** to **Advanced**.
-   - Scroll down to the **Security** section.
-   - Find **Allow scripts to access local files** (or similar) and set it to **Always** (or allow it when prompted).
-4. **Add the Scripts:**
-   - Click the Tampermonkey icon → **Create a new script...**
-   - Use the code in `template.js` as your boilerplate.
-   - Update the `@require` path in the template to point to the absolute path of `AiUtil.js` or `youtubenotes.js` on your local machine (e.g., `file:///path/to/repo/youtubenotes.js`).
-   - Save the script (`Ctrl + S` or `Cmd + S`).
+1. **Install Moss.** Follow its README: load it unpacked and turn on **Allow User Scripts**.
+2. **Import everything at once.** Moss dashboard → **Import…** → paste
+   `https://github.com/vididvidid/DailyScripts` → tick the scripts → **Import**.
+   - Keep **Keep updated automatically** on, and each script follows this repo.
+   - Imported scripts start disabled: enable the ones you want.
+3. **Accept the permissions.** fireButton asks for browsingData/history/tabs when you
+   enable it.
+
+Notes:
+- **Moss supports what Tampermonkey gave these scripts.**
+  - **Page access with GM functions:** youtubenotes and tinkatuff run in the page
+    itself (`@sandbox JavaScript`, for page variables and hooks) and still get
+    `GM_xmlhttpRequest`, `GM_setValue` and the menu.
+  - **Cross-tab value listeners:** gmailOtp's Gmail tab sends the code back to your
+    page through them.
+  - **Early start:** document-start scripts (monk, tinkatuff) start before the page's
+    own scripts, with their settings already loaded.
+- **Menu commands** (`GM_registerMenuCommand`) appear in Moss's toolbar popup.
+
+#### Live reload while editing
+
+1. Open the script in the Moss dashboard.
+2. Go to **Options → Source → Link a local file…** and pick the file. From Windows
+   Chrome that can be `\\wsl.localhost\Ubuntu\home\kali\DailyScripts\youtubenotes.js`.
+3. Moss reloads the script each time you save the file, while a Moss page is open.
+   This replaces the old `template.js` + `@require file://` stub; see `template.js`.
+
+### Tampermonkey
+
+1. **Install Tampermonkey**, open **Create a new script…**, and paste a whole file.
+2. **For live reload from your local copy:**
+   - Allow **access to file URLs** for Tampermonkey in `chrome://extensions`.
+   - In its Settings, set **Config mode → Advanced** and allow scripts to access
+     local files (**Externals → Always**).
+   - Add `// @require file:///path/to/DailyScripts/<file>.js` to an empty script
+     (see `template.js`).
 
 - Made by: me and other engineers (whose projects I used or part of code I used)
 - AI used: Gemini, Claude

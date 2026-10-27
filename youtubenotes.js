@@ -123,6 +123,32 @@
  * To see why a prompt did not appear:          YTNotes.reflection.debug()
  * ============================================================================
  */
+
+// Runs in the page itself (@sandbox JavaScript = page mode) so HistorySync can read YouTube's
+// ytcfg through unsafeWindow and window.YTNotes is reachable from the console.
+// Moss still gives page-mode scripts GM_xmlhttpRequest and GM_setValue (through
+// its relay), so gist sync keeps working. Tampermonkey: paste as is.
+
+// ==UserScript==
+// @name         YouTube Notes
+// @namespace    https://github.com/vididvidid/aiutils
+// @version      0.5.5
+// @description  Notes on videos and Shorts, a ❌ on everything you've already watched (synced from YouTube history and a GitHub Gist), and a speed bump after short videos.
+// @author       vididvidid
+// @match        https://www.youtube.com/*
+// @match        https://m.youtube.com/*
+// @sandbox      JavaScript
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      api.github.com
+// @connect      gist.githubusercontent.com
+// @noframes
+// @run-at       document-idle
+// ==/UserScript==
+
 (function () {
   'use strict';
 
