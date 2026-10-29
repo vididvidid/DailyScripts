@@ -1,0 +1,2447 @@
+// ==Moss==
+// name:        followMe
+// namespace:   https://github.com/vididvidid/DailyScripts
+// version:     0.1.0
+// description: Tap-by-pixel automation for any website: mark points on the page, chain clicks with pauses and "page loaded" / "URL changed" checks, and replay them. No selectors, no Puppeteer.
+// author:      vididvidid
+// homepage:    https://github.com/vididvidid/DailyScripts/tree/main/followMe
+// match:       *://*/*
+// noframes:
+// run-at:      document-idle
+// use:         moss/ui/toast as toast
+// ==/Moss==
+
+// Built by tools/build.mjs from src/ — edit those files, not this one.
+
+// ---------- src/core/util.js ----------
+
+/*
+ * Small helpers every other file uses. followMe is built by concatenating src/ in the
+ * order tools/build.mjs lists, like linking C translation units: each file declares
+ * plain functions and constants, and later files call earlier ones.
+ */
+
+const FM_PREFIX = 'fm';   // ids, CSS classes and storage keys start with this
+
+let id_counter = 0;
+
+/*
+ * new_id(kind) -> a fresh id such as "fm-step-l2k9x-3"
+ */
+function new_id(kind) {
+    id_counter++;
+    return `${FM_PREFIX}-${kind}-${Date.now().toString(36)}-${id_counter}`;
+}
+
+/*
+ * clone(value) -> a deep copy of plain JSON data
+ */
+function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+
+/*
+ * clamp(n, lo, hi) -> n kept between lo and hi
+ */
+function clamp(n, lo, hi) {
+    return Math.min(hi, Math.max(lo, n));
+}
+
+/*
+ * to_number(value, fallback) -> value as a finite number, or fallback
+ */
+function to_number(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+/*
+ * site_of(url) -> "https://example.com" for any URL on that site
+ */
+function site_of(url) {
+    try {
+        return new URL(url).origin;
+    } catch (e) {
+        return '';
+    }
+}
+
+/*
+ * pause(ms) -> Promise resolved after ms
+ */
+function pause(ms) {
+    return new Promise(function (resolve) {
+        setTimeout(resolve, Math.max(0, ms));
+    });
+}
+
+/*
+ * sleep(run, ms, on_tick) -> Promise<boolean>: waits ms in short slices so a stopped
+ * run wakes at once; false when the run was stopped. on_tick(left_ms) reports progress.
+ */
+async function sleep(run, ms, on_tick) {
+    const end = Date.now() + Math.max(0, ms);
+    while (Date.now() < end) {
+        if (run !== null && run.stopped) {
+            return false;
+        }
+        if (on_tick) {
+            on_tick(end - Date.now());
+        }
+        await pause(Math.min(100, end - Date.now()));
+    }
+    return run === null || !run.stopped;
+}
+
+/*
+ * with_jitter(ms, jitter) -> ms moved up or down by a random amount up to jitter
+ */
+function with_jitter(ms, jitter) {
+    if (!jitter) {
+        return ms;
+    }
+    return Math.max(0, Math.round(ms + (Math.random() * 2 - 1) * jitter));
+}
+
+/*
+ * format_ms(ms) -> "800 ms", "2.5 s", "1 min 30 s"
+ */
+function format_ms(ms) {
+    if (ms < 1000) {
+        return `${Math.round(ms)} ms`;
+    }
+    if (ms < 60000) {
+        return `${Math.round(ms / 100) / 10} s`;
+    }
+    const min = Math.floor(ms / 60000);
+    const sec = Math.round((ms % 60000) / 1000);
+    return sec === 0 ? `${min} min` : `${min} min ${sec} s`;
+}
+
+/*
+ * glob_test(pattern, text) -> true if text matches a "*" glob or a /regex/
+ */
+function glob_test(pattern, text) {
+    const re = /^\/(.+)\/([a-z]*)$/.exec(pattern);
+    try {
+        if (re !== null) {
+            return new RegExp(re[1], re[2].replace('g', '')).test(text);
+        }
+        const parts = pattern.split('*');
+        for (let i = 0; i < parts.length; i++) {
+            parts[i] = parts[i].replace(/[.+?^${}()|[\]\\/]/g, '\\$&');
+        }
+        return new RegExp(`^${parts.join('.*')}$`).test(text);
+    } catch (e) {
+        return false;
+    }
+}
+
+// ---------- src/core/steps.js ----------
+
+/*
+ * The data followMe stores: activities made of steps, and the checks attached to them.
+ *
+ * struct activity {
+ *     id, name: string;
+ *     site: string;            origin it was made on, "https://example.com"
+ *     pages: string;           where it may run: a "*" glob or /regex/ over the URL
+ *     loops: number;           how many times to play it; 0 = until stopped
+ *     loop_pause_ms: number;   pause between two loops
+ *     steps: struct step[];
+ *     created_at, updated_at: number;
+ * }
+ *
+ * struct step {
+ *     id: string;
+ *     label: string;           optional name ("Open menu"); empty = "Click 3"
+ *     action: 'click' | 'double_click' | 'right_click' | 'long_press' | 'type' | 'key' | 'scroll' | 'wait';
+ *     x, y: number;            where it was marked, in CSS pixels of the visible page
+ *     place: 'screen' | 'page' | 'scaled';   how x, y follow scrolling and resizing
+ *     scroll_x, scroll_y: number;   page scroll when it was marked ('page')
+ *     view_w, view_h: number;       window size when it was marked ('scaled')
+ *     text: string;            'type': what to type
+ *     clear_first: boolean;    'type': empty the field first
+ *     key: string;             'key': "Enter", "Escape", "Tab", "a", …
+ *     scroll_dx, scroll_dy: number;   'scroll': how far
+ *     hold_ms: number;         'long_press': how long the button stays down
+ *     repeat: number;          do the action this many times
+ *     repeat_pause_ms: number; pause between repeats
+ *     before: struct check[];  waited for before the action
+ *     after: struct check[];   waited for after the action
+ *     pause_ms: number;        the break after the step, before the next one
+ *     jitter_ms: number;       random ± on every pause, so timing isn't robotic
+ *     enabled: boolean;        skipped when false
+ * }
+ *
+ * struct check {
+ *     kind: 'loaded' | 'url_changed' | 'url_matches' | 'wait';
+ *     value: string;           'url_matches': glob or /regex/; 'wait': ms
+ *     timeout_ms: number;      give up after this long
+ *     on_timeout: 'stop' | 'continue';
+ * }
+ */
+
+const ACTIONS = {
+    click: { label: 'Left click', point: true },
+    double_click: { label: 'Double click', point: true },
+    right_click: { label: 'Right click', point: true },
+    long_press: { label: 'Long press', point: true },
+    type: { label: 'Type text', point: true },
+    key: { label: 'Press a key', point: false },
+    scroll: { label: 'Scroll', point: true },
+    wait: { label: 'Only wait', point: false },
+};
+
+const CHECKS = {
+    loaded: { label: 'Page fully loaded', value: false },
+    url_changed: { label: 'URL changed', value: false },
+    url_matches: { label: 'URL matches…', value: true },
+    wait: { label: 'Wait a fixed time', value: true },
+};
+
+const PLACES = {
+    screen: 'Same spot on the screen',
+    page: 'Same spot on the page (follows scrolling)',
+    scaled: 'Same spot relative to the window size',
+};
+
+const DEFAULT_TIMEOUT = 30000;
+
+/*
+ * activity_create(name, url) -> a new, empty struct activity for the page at url
+ */
+function activity_create(name, url) {
+    const site = site_of(url);
+    return {
+        id: new_id('act'),
+        name: name,
+        site: site,
+        pages: `${site}/*`,
+        loops: 1,
+        loop_pause_ms: 1000,
+        steps: [],
+        created_at: Date.now(),
+        updated_at: Date.now(),
+    };
+}
+
+/*
+ * step_create(x, y, view) -> a left click at (x, y); view: { scroll_x, scroll_y, w, h }
+ */
+function step_create(x, y, view) {
+    return {
+        id: new_id('step'),
+        label: '',
+        action: 'click',
+        x: Math.round(x),
+        y: Math.round(y),
+        place: 'screen',
+        scroll_x: Math.round(view.scroll_x),
+        scroll_y: Math.round(view.scroll_y),
+        view_w: Math.round(view.w),
+        view_h: Math.round(view.h),
+        text: '',
+        clear_first: true,
+        key: 'Enter',
+        scroll_dx: 0,
+        scroll_dy: 400,
+        hold_ms: 800,
+        repeat: 1,
+        repeat_pause_ms: 300,
+        before: [],
+        after: [],
+        pause_ms: 1000,
+        jitter_ms: 0,
+        enabled: true,
+    };
+}
+
+/*
+ * check_create(kind) -> a struct check with sensible defaults
+ */
+function check_create(kind) {
+    let value = '';
+    if (kind === 'wait') {
+        value = '1000';
+    } else if (kind === 'url_matches') {
+        value = '*/done*';
+    }
+    return { kind: kind, value: value, timeout_ms: DEFAULT_TIMEOUT, on_timeout: 'stop' };
+}
+
+/*
+ * step_title(step, index) -> "Click 3" or the step's own label
+ */
+function step_title(step, index) {
+    if (step.label) {
+        return step.label;
+    }
+    const word = step.action === 'wait' ? 'Wait' : (step.action === 'type' ? 'Type' : (step.action === 'key' ? 'Key' : (step.action === 'scroll' ? 'Scroll' : 'Click')));
+    return `${word} ${index + 1}`;
+}
+
+/*
+ * step_point(step, view) -> { x, y } where the step acts now, in viewport pixels;
+ *   view: { scroll_x, scroll_y, w, h } of the page as it is now
+ */
+function step_point(step, view) {
+    if (step.place === 'page') {
+        return { x: step.x + step.scroll_x - view.scroll_x, y: step.y + step.scroll_y - view.scroll_y };
+    }
+    if (step.place === 'scaled' && step.view_w > 0 && step.view_h > 0) {
+        return { x: Math.round(step.x * view.w / step.view_w), y: Math.round(step.y * view.h / step.view_h) };
+    }
+    return { x: step.x, y: step.y };
+}
+
+/*
+ * describe_check(check) -> "the page is fully loaded (up to 30 s)"
+ */
+function describe_check(check) {
+    const limit = `up to ${format_ms(check.timeout_ms)}, then ${check.on_timeout === 'stop' ? 'stop' : 'go on'}`;
+    switch (check.kind) {
+    case 'loaded':
+        return `the page has fully loaded (${limit})`;
+    case 'url_changed':
+        return `the URL has changed (${limit})`;
+    case 'url_matches':
+        return `the URL matches ${check.value} (${limit})`;
+    case 'wait':
+        return `${format_ms(to_number(check.value, 0))} have passed`;
+    default:
+        return check.kind;
+    }
+}
+
+/*
+ * describe_action(step) -> "left click at (412, 230)"
+ */
+function describe_action(step) {
+    const at = `at (${step.x}, ${step.y})`;
+    switch (step.action) {
+    case 'click':
+        return `left click ${at}`;
+    case 'double_click':
+        return `double click ${at}`;
+    case 'right_click':
+        return `right click ${at}`;
+    case 'long_press':
+        return `press and hold ${format_ms(step.hold_ms)} ${at}`;
+    case 'type':
+        return `type "${step.text}" into the field ${at}`;
+    case 'key':
+        return `press ${step.key}`;
+    case 'scroll':
+        return `scroll ${step.scroll_dy >= 0 ? 'down' : 'up'} ${Math.abs(step.scroll_dy)} px${step.scroll_dx !== 0 ? `, ${step.scroll_dx >= 0 ? 'right' : 'left'} ${Math.abs(step.scroll_dx)} px` : ''} ${at}`;
+    default:
+        return 'do nothing, only wait';
+    }
+}
+
+/*
+ * describe_how(step) -> how the step is carried out, in plain words
+ */
+function describe_how(step) {
+    switch (step.action) {
+    case 'click':
+    case 'double_click':
+    case 'right_click':
+        return 'Finds whatever is drawn at that pixel and sends it the same pointer and mouse events a real click makes (move, down, up, click), with the button and count of this action.';
+    case 'long_press':
+        return 'Presses the left button on whatever is at that pixel, keeps it down for the hold time, then releases it.';
+    case 'type':
+        return `Clicks the field at that pixel to focus it${step.clear_first ? ', empties it' : ''}, then types the text and tells the page the value changed (input and change events).`;
+    case 'key':
+        return 'Sends key down, key press and key up to whatever has the focus. Enter in a form field also submits the form.';
+    case 'scroll':
+        return 'Scrolls the nearest scrollable box under that pixel (or the page).';
+    default:
+        return 'Does nothing itself: only its checks and the pause run.';
+    }
+}
+
+/*
+ * describe_place(step) -> how the point follows scrolling or resizing
+ */
+function describe_place(step) {
+    if (step.place === 'page') {
+        return `on the page: marked with the page scrolled to (${step.scroll_x}, ${step.scroll_y}); it scrolls there if needed`;
+    }
+    if (step.place === 'scaled') {
+        return `relative to the window: marked in a ${step.view_w}×${step.view_h} window and scaled to the current size`;
+    }
+    return 'a fixed spot on the screen, wherever the page is scrolled';
+}
+
+/*
+ * activity_runs_on(activity, url) -> true if the activity is meant for that page
+ */
+function activity_runs_on(activity, url) {
+    return glob_test(activity.pages || `${activity.site}/*`, url);
+}
+
+/*
+ * activity_duration(activity) -> rough length of one loop in ms (pauses and waits only)
+ */
+function activity_duration(activity) {
+    let total = 0;
+    for (const step of activity.steps) {
+        if (!step.enabled) {
+            continue;
+        }
+        total += step.pause_ms + (step.repeat - 1) * step.repeat_pause_ms;
+        if (step.action === 'long_press') {
+            total += step.hold_ms * step.repeat;
+        }
+        for (const check of step.before.concat(step.after)) {
+            if (check.kind === 'wait') {
+                total += to_number(check.value, 0);
+            }
+        }
+    }
+    return total;
+}
+
+// ---------- src/core/store.js ----------
+
+/*
+ * Where activities live: one GM value holding every activity of every site, so the
+ * panel can list a site's activities and other tabs see changes at once. A run that
+ * a page load interrupts is kept per tab (GM_saveTab), so it carries on in that tab
+ * only.
+ *
+ * GM values:
+ *     fm_activities  { [id]: struct activity }
+ *     fm_prefs       struct prefs
+ * Tab value (GM_getTab): { fm_run: struct saved_run | undefined }
+ *
+ * struct prefs {
+ *     open: boolean;          panel open
+ *     side: 'right' | 'left';
+ *     show_marks: boolean;    numbered marks on the page while an activity is open
+ *     tab_y: number;          where the edge tab sits, 0..1 of the window height
+ * }
+ *
+ * struct saved_run {
+ *     activity_id: string;
+ *     step: number;           step being played when the page went away
+ *     loop: number;           loop number, from 0
+ *     phase: 'after';         the action ran; its "after" checks are next
+ *     url_before: string;     URL just before the action (for "URL changed")
+ *     at: number;             when it was saved; old ones are ignored
+ * }
+ */
+
+const ACTIVITIES_KEY = 'fm_activities';
+const PREFS_KEY = 'fm_prefs';
+const RUN_KEY = 'fm_run';
+const RESUME_WINDOW_MS = 120000;   // a saved run older than this is not resumed
+
+/*
+ * prefs_default() -> struct prefs
+ */
+function prefs_default() {
+    return { open: false, side: 'right', show_marks: true, tab_y: 0.4 };
+}
+
+/*
+ * load_prefs() -> struct prefs
+ */
+function load_prefs() {
+    return Object.assign(prefs_default(), GM_getValue(PREFS_KEY, {}));
+}
+
+/*
+ * save_prefs(prefs) — remember the panel's state
+ */
+function save_prefs(prefs) {
+    GM_setValue(PREFS_KEY, prefs);
+}
+
+/*
+ * load_all() -> { [id]: struct activity }
+ */
+function load_all() {
+    const all = GM_getValue(ACTIVITIES_KEY, {});
+    return all !== null && typeof all === 'object' ? all : {};
+}
+
+/*
+ * load_activity(id) -> struct activity or null
+ */
+function load_activity(id) {
+    const all = load_all();
+    return all[id] === undefined ? null : all[id];
+}
+
+/*
+ * activities_for(url) -> the activities meant for that page, newest first
+ */
+function activities_for(url) {
+    const all = load_all();
+    const out = [];
+    for (const id of Object.keys(all)) {
+        if (activity_runs_on(all[id], url) || all[id].site === site_of(url)) {
+            out.push(all[id]);
+        }
+    }
+    out.sort(function (a, b) {
+        return b.updated_at - a.updated_at;
+    });
+    return out;
+}
+
+/*
+ * save_activity(activity) -> the stored copy (updated_at refreshed)
+ */
+function save_activity(activity) {
+    const all = load_all();
+    const copy = clone(activity);
+    copy.updated_at = Date.now();
+    all[copy.id] = copy;
+    GM_setValue(ACTIVITIES_KEY, all);
+    return copy;
+}
+
+/*
+ * remove_activity(id) — forget an activity
+ */
+function remove_activity(id) {
+    const all = load_all();
+    delete all[id];
+    GM_setValue(ACTIVITIES_KEY, all);
+}
+
+/*
+ * export_activities(list) -> JSON text for sharing or backup
+ */
+function export_activities(list) {
+    return JSON.stringify({ followme: 1, exported_at: new Date().toISOString(), activities: list }, null, 2);
+}
+
+/*
+ * import_activities(text) -> how many activities were added (each gets a new id)
+ */
+function import_activities(text) {
+    const data = JSON.parse(text);
+    const list = Array.isArray(data) ? data : data.activities;
+    if (!Array.isArray(list)) {
+        throw new Error('No activities in that text.');
+    }
+    let count = 0;
+    for (const item of list) {
+        if (!item || !Array.isArray(item.steps)) {
+            continue;
+        }
+        const copy = Object.assign(activity_create(item.name || 'Imported', item.site || location.href), item);
+        copy.id = new_id('act');
+        save_activity(copy);
+        count++;
+    }
+    return count;
+}
+
+/*
+ * save_run_state(state) -> Promise; state null forgets it
+ */
+function save_run_state(state) {
+    return new Promise(function (resolve) {
+        GM_getTab(function (tab) {
+            const next = Object.assign({}, tab || {});
+            if (state === null) {
+                delete next[RUN_KEY];
+            } else {
+                next[RUN_KEY] = Object.assign({ at: Date.now() }, state);
+            }
+            GM_saveTab(next);
+            resolve();
+        });
+    });
+}
+
+/*
+ * load_run_state() -> Promise<struct saved_run | null>, only a recent one
+ */
+function load_run_state() {
+    return new Promise(function (resolve) {
+        GM_getTab(function (tab) {
+            const state = tab ? tab[RUN_KEY] : undefined;
+            if (!state || Date.now() - state.at > RESUME_WINDOW_MS) {
+                resolve(null);
+                return;
+            }
+            resolve(state);
+        });
+    });
+}
+
+// ---------- src/core/checks.js ----------
+
+/*
+ * The checks a step can wait for, before or after its action:
+ *
+ *   loaded       the page has fully loaded: the document says "complete", and then
+ *                nothing new was downloaded and nothing on the page changed for a
+ *                short quiet time — so a single-page app that draws its content
+ *                after "load" counts as loaded only once it settles
+ *   url_changed  the address differs from the one before the action (single-page
+ *                apps change it without reloading, so it is watched, not awaited)
+ *   url_matches  the address matches a "*" glob or /regex/
+ *   wait         a fixed time
+ *
+ * Every wait returns 'ok', 'timeout' or 'stopped'.
+ */
+
+const QUIET_MS = 700;      // "settled" = this long with no downloads and no DOM changes
+const POLL_MS = 100;
+
+/*
+ * resource_count() -> how many files the page has started downloading so far
+ */
+function resource_count() {
+    try {
+        return performance.getEntriesByType('resource').length;
+    } catch (e) {
+        return 0;
+    }
+}
+
+/*
+ * wait_until(run, timeout_ms, test, on_wait) -> 'ok' | 'timeout' | 'stopped';
+ *   polls test() until it is true
+ */
+async function wait_until(run, timeout_ms, test, on_wait) {
+    const end = Date.now() + timeout_ms;
+    while (true) {
+        if (run !== null && run.stopped) {
+            return 'stopped';
+        }
+        if (test()) {
+            return 'ok';
+        }
+        if (Date.now() >= end) {
+            return 'timeout';
+        }
+        if (on_wait) {
+            on_wait(end - Date.now());
+        }
+        await pause(POLL_MS);
+    }
+}
+
+/*
+ * wait_loaded(run, timeout_ms, on_wait) -> 'ok' | 'timeout' | 'stopped'
+ */
+async function wait_loaded(run, timeout_ms, on_wait) {
+    const end = Date.now() + timeout_ms;
+    const ready = await wait_until(run, timeout_ms, function () {
+        return document.readyState === 'complete';
+    }, on_wait);
+    if (ready !== 'ok') {
+        return ready;
+    }
+    // Then wait for a quiet moment: no new downloads, no DOM changes.
+    let last_change = Date.now();
+    let last_count = resource_count();
+    const observer = new MutationObserver(function () {
+        last_change = Date.now();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+    try {
+        return await wait_until(run, Math.max(0, end - Date.now()), function () {
+            const count = resource_count();
+            if (count !== last_count) {
+                last_count = count;
+                last_change = Date.now();
+            }
+            return Date.now() - last_change >= QUIET_MS;
+        }, on_wait);
+    } finally {
+        observer.disconnect();
+    }
+}
+
+/*
+ * run_check(run, check, url_before, on_wait) -> 'ok' | 'timeout' | 'stopped'
+ *   url_before: the address before the action this check belongs to
+ */
+async function run_check(run, check, url_before, on_wait) {
+    const timeout = to_number(check.timeout_ms, DEFAULT_TIMEOUT);
+    switch (check.kind) {
+    case 'loaded':
+        return wait_loaded(run, timeout, on_wait);
+    case 'url_changed':
+        return wait_until(run, timeout, function () {
+            return location.href !== url_before;
+        }, on_wait);
+    case 'url_matches':
+        return wait_until(run, timeout, function () {
+            return glob_test(check.value, location.href);
+        }, on_wait);
+    case 'wait':
+        return (await sleep(run, to_number(check.value, 0), on_wait)) ? 'ok' : 'stopped';
+    default:
+        return 'ok';
+    }
+}
+
+/*
+ * check_now(check, url_before) -> true if the check already holds (for the detail view)
+ */
+function check_now(check, url_before) {
+    switch (check.kind) {
+    case 'loaded':
+        return document.readyState === 'complete';
+    case 'url_changed':
+        return location.href !== url_before;
+    case 'url_matches':
+        return glob_test(check.value, location.href);
+    default:
+        return true;
+    }
+}
+
+// ---------- src/core/clicker.js ----------
+
+/*
+ * Acting on a pixel. No selectors: whatever the browser draws at (x, y) is the target,
+ * found with elementFromPoint (through same-origin iframes too), and it gets the same
+ * sequence of pointer, mouse, focus and click events a real click produces.
+ *
+ * Limits of a userscript: these events are marked untrusted (event.isTrusted is
+ * false), so a page that checks that, or a cross-origin iframe (a payment box, a
+ * captcha), cannot be clicked this way.
+ *
+ * struct hit { el: Element; x, y: number; win: Window }   x, y inside el's own frame
+ */
+
+const own_layers = [];   // followMe's own overlays, skipped when looking for a target
+
+/*
+ * register_layer(el) — mark one of followMe's elements as "not part of the page"
+ */
+function register_layer(el) {
+    own_layers.push(el);
+}
+
+/*
+ * unregister_layer(el) — forget a removed layer
+ */
+function unregister_layer(el) {
+    const i = own_layers.indexOf(el);
+    if (i >= 0) {
+        own_layers.splice(i, 1);
+    }
+}
+
+/*
+ * view_now() -> { scroll_x, scroll_y, w, h } of the window as it is now
+ */
+function view_now() {
+    return { scroll_x: window.scrollX, scroll_y: window.scrollY, w: window.innerWidth, h: window.innerHeight };
+}
+
+/*
+ * hit_at(x, y) -> struct hit for the element drawn at viewport pixel (x, y), or null
+ */
+function hit_at(x, y) {
+    // Hide followMe's layers for the lookup (marks sit right on the target pixels).
+    // It all happens before the next paint, so nothing flickers.
+    const saved = [];
+    for (const layer of own_layers) {
+        saved.push(layer.style.display);
+        layer.style.display = 'none';
+    }
+    let doc = document;
+    let win = window;
+    let lx = x;
+    let ly = y;
+    let el = null;
+    try {
+        el = doc.elementFromPoint(lx, ly);
+        // Step into same-origin iframes; a cross-origin one stays the target itself.
+        while (el !== null && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {
+            let inner = null;
+            try {
+                inner = el.contentDocument;
+            } catch (e) {
+                inner = null;
+            }
+            if (inner === null) {
+                break;
+            }
+            const box = el.getBoundingClientRect();
+            lx -= box.left + el.clientLeft;
+            ly -= box.top + el.clientTop;
+            win = el.contentWindow;
+            doc = inner;
+            el = doc.elementFromPoint(lx, ly);
+        }
+    } finally {
+        for (let i = 0; i < own_layers.length; i++) {
+            own_layers[i].style.display = saved[i];
+        }
+    }
+    return el === null ? null : { el: el, x: lx, y: ly, win: win };
+}
+
+/*
+ * describe_target(el) -> 'button "Sign in"', 'input[email]', 'a "Next →"' …
+ */
+function describe_target(el) {
+    if (el === null || el === undefined) {
+        return 'nothing (outside the page)';
+    }
+    let name = el.tagName.toLowerCase();
+    if (el.type && (name === 'input' || name === 'button')) {
+        name += `[${el.type}]`;
+    }
+    const text = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.innerText || el.value || el.title || el.alt || '')
+        .replace(/\s+/g, ' ').trim();
+    if (el.tagName === 'IFRAME') {
+        return `${name} (another site's frame: clicks can't reach inside)`;
+    }
+    return text === '' ? name : `${name} "${text.length > 40 ? `${text.slice(0, 40)}…` : text}"`;
+}
+
+/*
+ * mouse_init(hit, button, buttons, detail) -> the init dictionary shared by every event
+ */
+function mouse_init(hit, button, buttons, detail) {
+    return {
+        bubbles: true, cancelable: true, composed: true, view: hit.win,
+        clientX: hit.x, clientY: hit.y, screenX: hit.x + window.screenX, screenY: hit.y + window.screenY,
+        button: button, buttons: buttons, detail: detail,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: buttons ? 0.5 : 0,
+    };
+}
+
+/*
+ * fire(hit, type, init) — dispatch one pointer or mouse event on the target
+ */
+function fire(hit, type, init) {
+    const make = type.startsWith('pointer') ? hit.win.PointerEvent : hit.win.MouseEvent;
+    hit.el.dispatchEvent(new make(type, init));
+}
+
+/*
+ * focus_target(el) — focus el, or its nearest focusable ancestor
+ */
+function focus_target(el) {
+    let node = el;
+    while (node !== null && node !== undefined) {
+        if (typeof node.focus === 'function' && (node.tabIndex >= 0 || node.isContentEditable)) {
+            node.focus({ preventScroll: true });
+            return;
+        }
+        node = node.parentElement;
+    }
+}
+
+/*
+ * press(hit, button) — move over the target and push a button down
+ */
+function press(hit, button) {
+    const buttons = button === 2 ? 2 : 1;
+    fire(hit, 'pointerover', mouse_init(hit, 0, 0, 0));
+    fire(hit, 'mouseover', mouse_init(hit, 0, 0, 0));
+    fire(hit, 'pointermove', mouse_init(hit, 0, 0, 0));
+    fire(hit, 'mousemove', mouse_init(hit, 0, 0, 0));
+    fire(hit, 'pointerdown', mouse_init(hit, button, buttons, 1));
+    fire(hit, 'mousedown', mouse_init(hit, button, buttons, 1));
+    if (button === 0) {
+        focus_target(hit.el);
+    }
+}
+
+/*
+ * release(hit, button, detail) — let the button go; a left button also clicks
+ */
+function release(hit, button, detail) {
+    fire(hit, 'pointerup', mouse_init(hit, button, 0, detail));
+    fire(hit, 'mouseup', mouse_init(hit, button, 0, detail));
+    if (button === 0) {
+        fire(hit, 'click', mouse_init(hit, 0, 0, detail));
+    } else if (button === 2) {
+        fire(hit, 'contextmenu', mouse_init(hit, 2, 0, 1));
+    }
+}
+
+/*
+ * click_at(hit, kind) — 'click', 'double_click' or 'right_click'
+ */
+function click_at(hit, kind) {
+    if (kind === 'right_click') {
+        press(hit, 2);
+        release(hit, 2, 1);
+        return;
+    }
+    press(hit, 0);
+    release(hit, 0, 1);
+    if (kind === 'double_click') {
+        press(hit, 0);
+        release(hit, 0, 2);
+        fire(hit, 'dblclick', mouse_init(hit, 0, 0, 2));
+    }
+}
+
+/*
+ * long_press_at(run, hit, hold_ms) -> Promise; holds the left button down for hold_ms
+ */
+async function long_press_at(run, hit, hold_ms) {
+    press(hit, 0);
+    await sleep(run, hold_ms, null);
+    release(hit, 0, 1);
+}
+
+/*
+ * set_value(el, value) — set a form field's value the way typing does, so frameworks
+ * that watch the field (React, Vue, …) notice
+ */
+function set_value(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : (el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+    setter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/*
+ * type_at(hit, text, clear_first) — focus the field at the point and type text into it
+ */
+function type_at(hit, text, clear_first) {
+    click_at(hit, 'click');
+    const doc = hit.el.ownerDocument;
+    const field = doc.activeElement !== null && doc.activeElement !== doc.body ? doc.activeElement : hit.el;
+    if (field.isContentEditable) {
+        if (clear_first) {
+            doc.execCommand('selectAll', false, null);
+        }
+        doc.execCommand('insertText', false, text);
+        return;
+    }
+    if (field.tagName !== 'INPUT' && field.tagName !== 'TEXTAREA' && field.tagName !== 'SELECT') {
+        throw new Error(`Nothing to type into at that spot (found ${describe_target(field)}).`);
+    }
+    set_value(field, clear_first ? text : field.value + text);
+}
+
+const KEY_CODES = { Enter: 13, Escape: 27, Tab: 9, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, ' ': 32 };
+
+/*
+ * press_key(key) — key down, press and up on whatever has the focus; Enter in a form
+ * field also submits its form (untrusted key events don't do that by themselves)
+ */
+function press_key(key) {
+    const el = document.activeElement !== null ? document.activeElement : document.body;
+    const code = KEY_CODES[key] !== undefined ? KEY_CODES[key] : key.toUpperCase().charCodeAt(0);
+    const init = { key: key, code: key.length === 1 ? `Key${key.toUpperCase()}` : key, keyCode: code, which: code, bubbles: true, cancelable: true, composed: true };
+    const down = el.dispatchEvent(new KeyboardEvent('keydown', init));
+    if (key.length === 1 || key === 'Enter') {
+        el.dispatchEvent(new KeyboardEvent('keypress', init));
+    }
+    el.dispatchEvent(new KeyboardEvent('keyup', init));
+    if (down && key === 'Enter' && el.form && el.tagName === 'INPUT') {
+        el.form.requestSubmit();
+    }
+}
+
+/*
+ * scroll_at(hit, dx, dy) — scroll the nearest scrollable box under the point, or the page
+ */
+function scroll_at(hit, dx, dy) {
+    let node = hit === null ? null : hit.el;
+    while (node !== null && node !== document.body && node !== document.documentElement) {
+        const style = getComputedStyle(node);
+        const can_y = dy !== 0 && /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight;
+        const can_x = dx !== 0 && /(auto|scroll)/.test(style.overflowX) && node.scrollWidth > node.clientWidth;
+        if (can_y || can_x) {
+            node.scrollBy({ left: dx, top: dy, behavior: 'smooth' });
+            return;
+        }
+        node = node.parentElement;
+    }
+    window.scrollBy({ left: dx, top: dy, behavior: 'smooth' });
+}
+
+/*
+ * bring_into_view(step) -> { x, y } of the step's point, scrolling the page first when a
+ * 'page' point is off screen
+ */
+function bring_into_view(step) {
+    let point = step_point(step, view_now());
+    if (step.place === 'page' && (point.x < 0 || point.y < 0 || point.x >= window.innerWidth || point.y >= window.innerHeight)) {
+        window.scrollTo({ left: step.scroll_x, top: step.scroll_y, behavior: 'instant' });
+        point = step_point(step, view_now());
+    }
+    return point;
+}
+
+/*
+ * do_action(run, step) -> Promise; performs the step's action once
+ */
+async function do_action(run, step) {
+    if (step.action === 'wait') {
+        return;
+    }
+    if (step.action === 'key') {
+        press_key(step.key);
+        return;
+    }
+    const point = bring_into_view(step);
+    const hit = hit_at(point.x, point.y);
+    if (step.action === 'scroll') {
+        scroll_at(hit, to_number(step.scroll_dx, 0), to_number(step.scroll_dy, 0));
+        return;
+    }
+    if (hit === null) {
+        throw new Error(`Nothing at (${Math.round(point.x)}, ${Math.round(point.y)}): the point is outside the page.`);
+    }
+    if (step.action === 'long_press') {
+        await long_press_at(run, hit, step.hold_ms);
+    } else if (step.action === 'type') {
+        type_at(hit, step.text, step.clear_first);
+    } else {
+        click_at(hit, step.action);
+    }
+}
+
+// ---------- src/core/runner.js ----------
+
+/*
+ * Playing an activity: for each step, wait for its "before" checks, do the action
+ * (repeat times), wait for its "after" checks, then take the step's pause. Loops as
+ * often as the activity says. Only one run at a time per tab.
+ *
+ * A click that loads a new page ends this script, so just before every action the run
+ * is saved for this tab. When followMe starts on the next page it finds that and
+ * carries on with the step's "after" checks ("URL changed" is then already true).
+ *
+ * struct run {
+ *     activity: struct activity;
+ *     stopped: boolean;        set by stop_run(); every wait notices within 100 ms
+ *     step: number;            index of the step being played
+ *     loop: number;            loop number, from 0
+ *     phase: 'before' | 'action' | 'after' | 'pause' | 'done' | 'failed' | 'stopped';
+ *     text: string;            what it is doing, for the panel
+ *     left_ms: number;         time left in the current wait, or 0
+ *     last_url: string;        URL before the previous action ("before: URL changed")
+ *     error: string;
+ * }
+ */
+
+let current_run = null;
+const run_listeners = [];
+
+/*
+ * on_run_change(fn) — fn(run) is called whenever the current run changes
+ */
+function on_run_change(fn) {
+    run_listeners.push(fn);
+}
+
+/*
+ * notify(run) — tell the panel and the marks
+ */
+function notify(run) {
+    for (const fn of run_listeners) {
+        try {
+            fn(run);
+        } catch (e) {
+            console.error('followMe:', e);
+        }
+    }
+}
+
+/*
+ * set_phase(run, phase, text) — update what the run is doing
+ */
+function set_phase(run, phase, text) {
+    run.phase = phase;
+    run.text = text;
+    run.left_ms = 0;
+    notify(run);
+}
+
+/*
+ * ticker(run) -> an on_wait callback that shows the time left (at most ~5 times a second)
+ */
+function ticker(run) {
+    let last = 0;
+    return function (left_ms) {
+        if (Date.now() - last < 200) {
+            return;
+        }
+        last = Date.now();
+        run.left_ms = left_ms;
+        notify(run);
+    };
+}
+
+/*
+ * run_checks(run, checks, url_before, when) -> true to go on, false to end the run
+ */
+async function run_checks(run, checks, url_before, when) {
+    for (const check of checks) {
+        set_phase(run, when, `${step_title(run.activity.steps[run.step], run.step)}: waiting until ${describe_check(check)}`);
+        const result = await run_check(run, check, url_before, ticker(run));
+        if (result === 'stopped') {
+            return false;
+        }
+        if (result === 'timeout' && check.on_timeout === 'stop') {
+            run.error = `${step_title(run.activity.steps[run.step], run.step)}: gave up waiting until ${describe_check(check)}.`;
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * play_step(run, step, resume) -> true to go on; resume: the saved run when this step's
+ * action already happened on the previous page
+ */
+async function play_step(run, step, resume) {
+    const title = step_title(step, run.step);
+    let url_before = location.href;
+    if (resume !== null) {
+        url_before = resume.url_before;
+    } else {
+        if (!(await run_checks(run, step.before, run.last_url, 'before'))) {
+            return false;
+        }
+        url_before = location.href;
+        for (let r = 0; r < Math.max(1, step.repeat); r++) {
+            await save_run_state({ activity_id: run.activity.id, step: run.step, loop: run.loop, phase: 'after', url_before: url_before });
+            const times = step.repeat > 1 ? ` (${r + 1} of ${step.repeat})` : '';
+            set_phase(run, 'action', `${title}: ${describe_action(step)}${times}`);
+            await do_action(run, step);
+            if (run.stopped) {
+                return false;
+            }
+            if (r < step.repeat - 1 && !(await sleep(run, with_jitter(step.repeat_pause_ms, step.jitter_ms), ticker(run)))) {
+                return false;
+            }
+        }
+    }
+    if (!(await run_checks(run, step.after, url_before, 'after'))) {
+        return false;
+    }
+    run.last_url = url_before;
+    return true;
+}
+
+/*
+ * is_last(run, index) -> true if index is the last enabled step of the last loop
+ */
+function is_last(run, index) {
+    const steps = run.activity.steps;
+    for (let i = index + 1; i < steps.length; i++) {
+        if (steps[i].enabled) {
+            return false;
+        }
+    }
+    return run.activity.loops !== 0 && run.loop >= run.activity.loops - 1;
+}
+
+/*
+ * play(run, resume) -> Promise; the whole run, from run.step / run.loop
+ */
+async function play(run, resume) {
+    const steps = run.activity.steps;
+    let pending = resume;
+    while (run.activity.loops === 0 || run.loop < run.activity.loops) {
+        for (; run.step < steps.length; run.step++) {
+            const step = steps[run.step];
+            if (!step.enabled) {
+                continue;
+            }
+            if (!(await play_step(run, step, pending))) {
+                return;
+            }
+            pending = null;
+            if (!is_last(run, run.step)) {
+                set_phase(run, 'pause', `${step_title(step, run.step)} done — pausing`);
+                if (!(await sleep(run, with_jitter(step.pause_ms, step.jitter_ms), ticker(run)))) {
+                    return;
+                }
+            }
+        }
+        run.step = 0;
+        run.loop++;
+        if (run.activity.loops === 0 || run.loop < run.activity.loops) {
+            set_phase(run, 'pause', `Loop ${run.loop} done — next loop`);
+            if (!(await sleep(run, run.activity.loop_pause_ms, ticker(run)))) {
+                return;
+            }
+        }
+    }
+}
+
+/*
+ * start_run(activity, opts) -> Promise<struct run> once it ends;
+ *   opts: { step, loop, resume: struct saved_run | null }
+ */
+async function start_run(activity, opts) {
+    const o = opts || {};
+    if (current_run !== null && !current_run.stopped && current_run.phase !== 'done') {
+        stop_run();
+    }
+    const run = {
+        activity: clone(activity), stopped: false, step: o.step || 0, loop: o.loop || 0,
+        phase: 'before', text: 'Starting…', left_ms: 0, last_url: location.href, error: '',
+    };
+    current_run = run;
+    notify(run);
+    try {
+        await play(run, o.resume || null);
+    } catch (e) {
+        run.error = `${step_title(run.activity.steps[run.step] || {}, run.step)}: ${e.message}`;
+    }
+    await save_run_state(null);
+    if (run.error !== '') {
+        set_phase(run, 'failed', run.error);
+    } else if (run.stopped) {
+        set_phase(run, 'stopped', 'Stopped');
+    } else {
+        set_phase(run, 'done', `Finished "${run.activity.name}"`);
+    }
+    return run;
+}
+
+/*
+ * stop_run() — stop the current run (it notices within 100 ms)
+ */
+function stop_run() {
+    if (current_run !== null) {
+        current_run.stopped = true;
+        notify(current_run);
+    }
+    save_run_state(null);
+}
+
+/*
+ * is_running() -> true while a run is playing
+ */
+function is_running() {
+    return current_run !== null && !current_run.stopped && ['before', 'action', 'after', 'pause'].indexOf(current_run.phase) >= 0;
+}
+
+/*
+ * test_step(step) -> Promise; does one step's action right now, without its checks
+ */
+async function test_step(step) {
+    await do_action(null, step);
+}
+
+/*
+ * resume_saved_run() -> Promise; carry on with a run a page load interrupted
+ */
+async function resume_saved_run() {
+    const saved = await load_run_state();
+    if (saved === null) {
+        return null;
+    }
+    const activity = load_activity(saved.activity_id);
+    if (activity === null || saved.step >= activity.steps.length) {
+        await save_run_state(null);
+        return null;
+    }
+    return start_run(activity, { step: saved.step, loop: saved.loop, resume: saved });
+}
+
+// ---------- src/ui/styles.js ----------
+
+/*
+ * followMe's styles, one string per layer. BASE_CSS (colours, buttons, fields) goes
+ * into every layer; light and dark follow the system.
+ */
+
+const BASE_CSS = `
+:host { all: initial; }
+* { box-sizing: border-box; }
+.fm {
+  --bg: #ffffff; --bg2: #f4f6f9; --fg: #1d232b; --muted: #6a7480; --line: #dfe4ea;
+  --accent: #e8590c; --accent-fg: #fff; --accent-soft: #fff0e6; --ok: #2f9e44; --bad: #e03131;
+  --mark: #e8590c; --shadow: 0 10px 30px rgba(0,0,0,.18);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--fg);
+}
+@media (prefers-color-scheme: dark) {
+  .fm { --bg: #1b1f24; --bg2: #23282f; --fg: #e6e9ee; --muted: #9aa4b0; --line: #343b44;
+    --accent: #ff8a3d; --accent-fg: #1b1f24; --accent-soft: #3a2a1e; --shadow: 0 10px 30px rgba(0,0,0,.5); }
+}
+button { font: inherit; color: inherit; cursor: pointer; }
+.btn { border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 5px 10px; }
+.btn:hover { background: var(--bg2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.btn.danger { color: var(--bad); }
+.btn.ghost { border-color: transparent; background: transparent; }
+.btn.small { padding: 2px 7px; font-size: 12px; }
+.btn:disabled { opacity: .45; cursor: default; }
+input, select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; min-width: 0; }
+input[type=number] { width: 62px; }
+input.secs { width: 58px; }
+input[type=checkbox] { width: auto; accent-color: var(--accent); }
+.muted { color: var(--muted); }
+.row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.grow { flex: 1; }
+.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 6px;
+  border-radius: 11px; background: var(--mark); color: #fff; font-weight: 700; font-size: 12px; }
+`;
+
+const PANEL_CSS = `
+.panel { position: fixed; top: 0; bottom: 0; width: 370px; max-width: 100vw; background: var(--bg); border-left: 1px solid var(--line);
+  box-shadow: var(--shadow); display: flex; flex-direction: column; }
+.panel.right { right: 0; } .panel.left { left: 0; border-left: 0; border-right: 1px solid var(--line); }
+.head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.logo { font-weight: 800; letter-spacing: -.02em; font-size: 15px; } .logo b { color: var(--accent); }
+.site { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.body { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.foot { border-top: 1px solid var(--line); padding: 8px 12px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.status { padding: 8px 12px; border-top: 1px solid var(--line); background: var(--accent-soft); font-size: 12px; display: flex; gap: 8px; align-items: center; }
+.status.done { background: var(--bg2); } .status.failed { background: #ffe3e3; color: #a51d1d; }
+@media (prefers-color-scheme: dark) { .status.failed { background: #3b1e1e; color: #ffb3b3; } }
+.status .text { flex: 1; }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--bg); }
+.card.clickable { cursor: pointer; } .card.clickable:hover { border-color: var(--accent); }
+.card h3 { margin: 0; font-size: 14px; }
+.empty { text-align: center; color: var(--muted); padding: 24px 8px; }
+.empty b { color: var(--fg); }
+.name { font-weight: 600; font-size: 15px; border-color: transparent; width: 100%; padding: 3px 6px; }
+.name:hover, .name:focus { border-color: var(--line); }
+.steps { display: flex; flex-direction: column; gap: 8px; }
+.step { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.step.current { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.step.off { opacity: .55; }
+.step-head { display: flex; gap: 8px; align-items: center; padding: 8px 10px; cursor: pointer; }
+.step-head .what { flex: 1; min-width: 0; }
+.step-head .title { font-weight: 600; }
+.step-head .desc { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-body { border-top: 1px solid var(--line); padding: 10px; display: flex; flex-direction: column; gap: 10px; background: var(--bg2); border-radius: 0 0 10px 10px; }
+.section > .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; margin-bottom: 4px; }
+.screen { position: relative; width: 120px; height: 76px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); flex: none; }
+.screen.tiny { width: 40px; height: 26px; border-radius: 3px; }
+.screen .dot { position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: var(--mark); }
+.screen.tiny .dot { width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; }
+.check { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 6px 8px; border: 1px dashed var(--line); border-radius: 8px; background: var(--bg); }
+.check .kind { font-weight: 600; flex: 1; min-width: 120px; }
+.how { font-size: 12px; color: var(--muted); }
+.hits { font-size: 12px; } .hits code { font: 12px ui-monospace, monospace; background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+.flow { color: var(--muted); font-size: 12px; text-align: center; }
+textarea { font: 12px ui-monospace, monospace; width: 100%; min-height: 160px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+`;
+
+const TAB_CSS = `
+.tab { position: fixed; width: 30px; height: 64px; background: var(--accent); color: var(--accent-fg); border: 0; box-shadow: var(--shadow);
+  font-weight: 800; font-size: 12px; writing-mode: vertical-rl; display: flex; align-items: center; justify-content: center; opacity: .85; }
+.tab:hover { opacity: 1; }
+.tab.right { right: 0; border-radius: 10px 0 0 10px; } .tab.left { left: 0; border-radius: 0 10px 10px 0; }
+.tab.running { animation: fm-pulse 1s infinite; }
+@keyframes fm-pulse { 50% { opacity: .5; } }
+`;
+
+const MARKS_CSS = `
+.marks { position: fixed; inset: 0; pointer-events: none; }
+.marks svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.marks line { stroke: var(--mark); stroke-width: 2; stroke-dasharray: 5 5; opacity: .6; }
+.mark { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%; pointer-events: auto; cursor: grab;
+  background: rgba(232, 89, 12, .22); border: 2px solid var(--mark); display: flex; align-items: center; justify-content: center;
+  color: #fff; font: 700 12px system-ui, sans-serif; text-shadow: 0 0 3px #000, 0 0 2px #000; user-select: none; touch-action: none; }
+.mark::after { content: ""; position: absolute; width: 4px; height: 4px; border-radius: 50%; background: var(--mark); left: 11px; top: 11px; }
+.mark span { position: absolute; top: -18px; left: 50%; transform: translateX(-50%); background: var(--mark); border-radius: 9px; padding: 0 6px;
+  font-size: 11px; line-height: 16px; text-shadow: none; white-space: nowrap; }
+.mark.selected { border-width: 3px; background: rgba(232, 89, 12, .38); }
+.mark.active { animation: fm-ping .8s infinite; }
+.mark.off { opacity: .35; }
+.mark.dragging { cursor: grabbing; }
+@keyframes fm-ping { 0% { box-shadow: 0 0 0 0 rgba(232, 89, 12, .7); } 100% { box-shadow: 0 0 0 16px rgba(232, 89, 12, 0); } }
+`;
+
+const PICKER_CSS = `
+.picker { position: fixed; inset: 0; cursor: crosshair; background: rgba(0, 0, 0, .04); }
+.hline, .vline { position: absolute; background: var(--mark); opacity: .6; pointer-events: none; }
+.hline { left: 0; right: 0; height: 1px; } .vline { top: 0; bottom: 0; width: 1px; }
+.info { position: absolute; pointer-events: none; background: var(--bg); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow);
+  border-radius: 8px; padding: 6px 9px; font-size: 12px; max-width: 320px; }
+.info b { color: var(--accent); }
+.banner { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); background: var(--fg); color: var(--bg); border-radius: 20px;
+  padding: 7px 14px; font-weight: 600; pointer-events: none; box-shadow: var(--shadow); }
+`;
+
+// ---------- src/ui/dom.js ----------
+
+/*
+ * Building followMe's own elements. Each layer (panel, edge tab, marks, picker) is a
+ * host element on top of the page with a closed shadow root, so the page's CSS can't
+ * restyle it and the page's scripts can't reach into it.
+ *
+ * struct layer { host: HTMLElement; root: ShadowRoot }
+ */
+
+/*
+ * append_all(el, children) — append nodes and strings, skipping null/false, flattening arrays
+ */
+function append_all(el, children) {
+    for (const child of children) {
+        if (child === null || child === undefined || child === false) {
+            continue;
+        }
+        if (Array.isArray(child)) {
+            append_all(el, child);
+        } else {
+            el.append(child);
+        }
+    }
+}
+
+/*
+ * h(tag, props, ...children) -> a new element
+ *   props: class, on_<event> handlers, attributes, properties
+ */
+function h(tag, props) {
+    const el = document.createElement(tag);
+    const p = props || {};
+    for (const key of Object.keys(p)) {
+        const value = p[key];
+        if (value === null || value === undefined || value === false) {
+            continue;
+        }
+        if (key.startsWith('on_')) {
+            el.addEventListener(key.slice(3), value);
+        } else if (key === 'class') {
+            el.className = value;
+        } else if (key === 'style' && typeof value === 'object') {
+            Object.assign(el.style, value);
+        } else if (key in el && typeof value !== 'string') {
+            el[key] = value;
+        } else {
+            el.setAttribute(key, value === true ? '' : value);
+        }
+    }
+    append_all(el, Array.prototype.slice.call(arguments, 2));
+    return el;
+}
+
+/*
+ * layer_create(name, css) -> struct layer: a fixed, topmost host with its own styles
+ */
+function layer_create(name, css) {
+    const host = document.createElement('div');
+    host.setAttribute('data-followme', name);
+    host.style.cssText = 'all: initial; position: fixed; z-index: 2147483647; top: 0; left: 0; width: 0; height: 0;';
+    const root = host.attachShadow({ mode: 'closed' });
+    root.append(h('style', null, BASE_CSS + css));
+    document.documentElement.append(host);
+    register_layer(host);
+    return { host: host, root: root };
+}
+
+/*
+ * layer_remove(layer) — take a layer off the page
+ */
+function layer_remove(layer) {
+    unregister_layer(layer.host);
+    layer.host.remove();
+}
+
+/*
+ * number_field(value, on_change, attrs) -> an <input type=number> that reports numbers
+ */
+function number_field(value, on_change, attrs) {
+    return h('input', Object.assign({
+        type: 'number',
+        value: String(value),
+        on_change: function (event) {
+            on_change(to_number(event.target.value, value));
+        },
+    }, attrs || {}));
+}
+
+/*
+ * text_field(value, on_change, attrs) -> an <input> that reports its text on change
+ */
+function text_field(value, on_change, attrs) {
+    return h('input', Object.assign({
+        type: 'text',
+        value: value,
+        spellcheck: 'false',
+        on_change: function (event) {
+            on_change(event.target.value);
+        },
+    }, attrs || {}));
+}
+
+/*
+ * select_field(value, options, on_change) -> a <select>; options: { value: label }
+ */
+function select_field(value, options, on_change) {
+    const items = [];
+    for (const key of Object.keys(options)) {
+        items.push(h('option', { value: key, selected: key === value }, options[key]));
+    }
+    return h('select', {
+        on_change: function (event) {
+            on_change(event.target.value);
+        },
+    }, items);
+}
+
+/*
+ * seconds_field(ms, on_change) -> a number field in seconds that reports milliseconds
+ */
+function seconds_field(ms, on_change) {
+    return number_field(Math.round(ms) / 1000, function (s) {
+        on_change(Math.max(0, Math.round(s * 1000)));
+    }, { step: '0.1', min: '0', class: 'secs' });
+}
+
+// ---------- src/ui/picker.js ----------
+
+/*
+ * Marking a pixel: a see-through layer over the whole page with a crosshair that
+ * follows the pointer and shows the coordinates and what is under them. A click there
+ * marks the point (the page itself is not clicked); Esc cancels.
+ */
+
+let picking = null;   // the open picker's finish function, or null
+
+/*
+ * pick_point(number) -> Promise<{ x, y } | null>; number is shown as "Click <number>"
+ */
+function pick_point(number) {
+    if (picking !== null) {
+        picking(null);
+    }
+    return new Promise(function (resolve) {
+        const layer = layer_create('picker', PICKER_CSS);
+        const hline = h('div', { class: 'hline' });
+        const vline = h('div', { class: 'vline' });
+        const info = h('div', { class: 'info' }, 'Move to the spot');
+        const overlay = h('div', { class: 'picker' }, hline, vline, info,
+            h('div', { class: 'banner' }, `Click where Click ${number} should go · Esc to cancel`));
+        layer.root.append(h('div', { class: 'fm' }, overlay));
+
+        /*
+         * finish(point) — close the picker and answer
+         */
+        function finish(point) {
+            picking = null;
+            document.removeEventListener('keydown', on_key, true);
+            layer_remove(layer);
+            resolve(point);
+        }
+
+        /*
+         * on_key(event) — Esc cancels
+         */
+        function on_key(event) {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                finish(null);
+            }
+        }
+
+        overlay.addEventListener('pointermove', function (event) {
+            const x = event.clientX;
+            const y = event.clientY;
+            hline.style.top = `${y}px`;
+            vline.style.left = `${x}px`;
+            const hit = hit_at(x, y);   // the picker layer itself is skipped
+            info.replaceChildren(h('b', null, `(${Math.round(x)}, ${Math.round(y)})`), ' ', describe_target(hit === null ? null : hit.el));
+            const right = x + 340 > window.innerWidth;
+            info.style.left = right ? '' : `${x + 14}px`;
+            info.style.right = right ? `${window.innerWidth - x + 14}px` : '';
+            info.style.top = `${Math.min(y + 14, window.innerHeight - 50)}px`;
+        });
+        overlay.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            finish({ x: event.clientX, y: event.clientY });
+        });
+        overlay.addEventListener('contextmenu', function (event) {
+            event.preventDefault();
+            finish(null);
+        });
+        document.addEventListener('keydown', on_key, true);
+        picking = finish;
+    });
+}
+
+// ---------- src/ui/marks.js ----------
+
+/*
+ * The numbered marks: one circle per step at the pixel it acts on, joined by a dashed
+ * line in play order, like an auto-tapper's targets. Drag a mark to move its step.
+ * The playing step pulses.
+ *
+ * struct marks (one, below) {
+ *     layer: struct layer | null;
+ *     activity: struct activity | null;   shown, or null for none
+ *     selected: number;                   step open in the panel, or -1
+ *     active: number;                     step being played, or -1
+ *     on_move(index, x, y);               a mark was dragged to (x, y)
+ *     frame: number;                      pending animation frame, or 0
+ * }
+ */
+
+const marks = { layer: null, activity: null, selected: -1, active: -1, on_move: null, frame: 0 };
+
+/*
+ * marks_set(activity, selected, on_move) — show these marks (activity null hides them)
+ */
+function marks_set(activity, selected, on_move) {
+    marks.activity = activity;
+    marks.selected = selected;
+    marks.on_move = on_move;
+    marks_render();
+}
+
+/*
+ * marks_active(index) — highlight the step being played (-1: none)
+ */
+function marks_active(index) {
+    if (marks.active !== index) {
+        marks.active = index;
+        marks_render();
+    }
+}
+
+/*
+ * marks_render_soon() — redraw once before the next frame (scrolling, resizing)
+ */
+function marks_render_soon() {
+    if (marks.frame === 0 && marks.activity !== null) {
+        marks.frame = requestAnimationFrame(function () {
+            marks.frame = 0;
+            marks_render();
+        });
+    }
+}
+
+/*
+ * drag_mark(el, index, event) — move a mark with the pointer, then report where it landed
+ */
+function drag_mark(el, index, event) {
+    event.preventDefault();
+    event.stopPropagation();
+    el.setPointerCapture(event.pointerId);
+    el.classList.add('dragging');
+
+    /*
+     * on_move(e) — follow the pointer
+     */
+    function on_move(e) {
+        el.style.left = `${e.clientX}px`;
+        el.style.top = `${e.clientY}px`;
+    }
+
+    /*
+     * on_up(e) — drop the mark
+     */
+    function on_up(e) {
+        el.removeEventListener('pointermove', on_move);
+        el.removeEventListener('pointerup', on_up);
+        el.classList.remove('dragging');
+        if (marks.on_move !== null) {
+            marks.on_move(index, e.clientX, e.clientY);
+        }
+    }
+    el.addEventListener('pointermove', on_move);
+    el.addEventListener('pointerup', on_up);
+}
+
+/*
+ * marks_render() — draw the marks of the shown activity
+ */
+function marks_render() {
+    if (marks.activity === null) {
+        if (marks.layer !== null) {
+            layer_remove(marks.layer);
+            marks.layer = null;
+        }
+        return;
+    }
+    if (marks.layer === null) {
+        marks.layer = layer_create('marks', MARKS_CSS);
+    }
+    const view = view_now();
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const dots = [];
+    let prev = null;
+    const steps = marks.activity.steps;
+    for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        if (!ACTIONS[step.action].point) {
+            continue;
+        }
+        const p = step_point(step, view);
+        if (prev !== null && step.enabled) {
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', prev.x);
+            line.setAttribute('y1', prev.y);
+            line.setAttribute('x2', p.x);
+            line.setAttribute('y2', p.y);
+            svg.append(line);
+        }
+        if (step.enabled) {
+            prev = p;
+        }
+        let cls = 'mark';
+        if (i === marks.selected) {
+            cls += ' selected';
+        }
+        if (i === marks.active) {
+            cls += ' active';
+        }
+        if (!step.enabled) {
+            cls += ' off';
+        }
+        const index = i;
+        const dot = h('div', {
+            class: cls,
+            title: `${step_title(step, i)}: ${describe_action(step)} — drag to move`,
+            style: { left: `${p.x}px`, top: `${p.y}px` },
+            on_pointerdown: function (event) {
+                drag_mark(dot, index, event);
+            },
+        }, String(i + 1), h('span', null, step_title(step, i)));
+        dots.push(dot);
+    }
+    marks.layer.root.replaceChildren(h('style', null, BASE_CSS + MARKS_CSS), h('div', { class: 'fm marks' }, svg, dots));
+}
+
+window.addEventListener('scroll', marks_render_soon, { passive: true });
+window.addEventListener('resize', marks_render_soon);
+
+// ---------- src/ui/panel.js ----------
+
+/*
+ * The side panel. Two views:
+ *   list    — this site's activities: play one, open one, make a new one
+ *   detail  — one activity: its steps in order. Each step opens to show where it acts
+ *             on the screen (a small map of the window, the pixel, what is there right
+ *             now), what it does, how it does it, what it waits for before and after,
+ *             and the break before the next step.
+ * Plus a third, 'transfer', for exporting and importing activities as JSON.
+ *
+ * struct panel (one, below) {
+ *     layer: struct layer | null;
+ *     view: 'list' | 'detail' | 'transfer';
+ *     activity: struct activity | null;   the one open in 'detail'
+ *     open_step: number;                  step whose details are shown, or -1
+ *     prefs: struct prefs;
+ *     status: HTMLElement | null;         the run status bar
+ *     rows: HTMLElement[];                step rows, to mark the playing one
+ *     hidden: boolean;                    hidden while marking a point
+ * }
+ */
+
+const panel = { layer: null, view: 'list', activity: null, open_step: -1, prefs: null, status: null, rows: [], hidden: false };
+
+// ---------- opening and closing ----------
+
+/*
+ * panel_open() — show the panel
+ */
+function panel_open() {
+    panel.prefs.open = true;
+    save_prefs(panel.prefs);
+    panel_render();
+    tab_render();
+}
+
+/*
+ * panel_close() — hide the panel (and the marks, unless a run is playing)
+ */
+function panel_close() {
+    panel.prefs.open = false;
+    save_prefs(panel.prefs);
+    if (panel.layer !== null) {
+        layer_remove(panel.layer);
+        panel.layer = null;
+    }
+    if (!is_running()) {
+        marks_set(null, -1, null);
+    }
+    tab_render();
+}
+
+/*
+ * panel_toggle() — open or close
+ */
+function panel_toggle() {
+    if (panel.prefs.open) {
+        panel_close();
+    } else {
+        panel_open();
+    }
+}
+
+// ---------- editing the open activity ----------
+
+/*
+ * commit(change, rerender) — change the open activity, store it, redraw the marks and,
+ * when rerender, the panel
+ */
+function commit(change, rerender) {
+    change(panel.activity);
+    panel.activity = save_activity(panel.activity);
+    show_marks();
+    if (rerender) {
+        panel_render();
+    }
+}
+
+/*
+ * edit_step(index, change, rerender) — commit a change to one step
+ */
+function edit_step(index, change, rerender) {
+    commit(function (activity) {
+        change(activity.steps[index]);
+    }, rerender);
+}
+
+/*
+ * show_marks() — marks for the open activity, if the user wants them
+ */
+function show_marks() {
+    if (panel.view === 'detail' && panel.activity !== null && panel.prefs.show_marks && !panel.hidden) {
+        marks_set(panel.activity, panel.open_step, move_step_to);
+    } else if (!is_running()) {
+        marks_set(null, -1, null);
+    }
+}
+
+/*
+ * move_step_to(index, x, y) — a mark was dragged: the step now acts there
+ */
+function move_step_to(index, x, y) {
+    const view = view_now();
+    edit_step(index, function (step) {
+        step.x = Math.round(x);
+        step.y = Math.round(y);
+        step.scroll_x = Math.round(view.scroll_x);
+        step.scroll_y = Math.round(view.scroll_y);
+        step.view_w = view.w;
+        step.view_h = view.h;
+    }, true);
+}
+
+/*
+ * with_panel_hidden(task) -> Promise of task(); the panel steps aside while you mark a point
+ */
+async function with_panel_hidden(task) {
+    panel.hidden = true;
+    if (panel.layer !== null) {
+        panel.layer.host.style.display = 'none';
+    }
+    try {
+        return await task();
+    } finally {
+        panel.hidden = false;
+        if (panel.layer !== null) {
+            panel.layer.host.style.display = '';
+        }
+    }
+}
+
+/*
+ * add_point_step() — mark a pixel and add a click there (after the open step, or last)
+ */
+async function add_point_step() {
+    const at = panel.open_step >= 0 ? panel.open_step + 1 : panel.activity.steps.length;
+    const point = await with_panel_hidden(function () {
+        return pick_point(at + 1);
+    });
+    if (point === null) {
+        show_marks();
+        return;
+    }
+    const step = step_create(point.x, point.y, view_now());
+    commit(function (activity) {
+        activity.steps.splice(at, 0, step);
+    }, false);
+    panel.open_step = at;
+    panel_render();
+}
+
+/*
+ * add_other_step(action) — add a step that needs no point ('wait' or 'key')
+ */
+function add_other_step(action) {
+    const at = panel.open_step >= 0 ? panel.open_step + 1 : panel.activity.steps.length;
+    const step = step_create(0, 0, view_now());
+    step.action = action;
+    commit(function (activity) {
+        activity.steps.splice(at, 0, step);
+    }, false);
+    panel.open_step = at;
+    panel_render();
+}
+
+/*
+ * remark_step(index) — mark a new pixel for an existing step
+ */
+async function remark_step(index) {
+    const point = await with_panel_hidden(function () {
+        return pick_point(index + 1);
+    });
+    if (point !== null) {
+        move_step_to(index, point.x, point.y);
+    } else {
+        show_marks();
+    }
+}
+
+/*
+ * move_step(index, by) — move a step up (-1) or down (+1)
+ */
+function move_step(index, by) {
+    const to = index + by;
+    if (to < 0 || to >= panel.activity.steps.length) {
+        return;
+    }
+    commit(function (activity) {
+        const step = activity.steps.splice(index, 1)[0];
+        activity.steps.splice(to, 0, step);
+    }, false);
+    panel.open_step = panel.open_step === index ? to : panel.open_step;
+    panel_render();
+}
+
+/*
+ * open_activity(activity) — show one activity in detail
+ */
+function open_activity(activity) {
+    panel.activity = activity;
+    panel.view = 'detail';
+    panel.open_step = -1;
+    panel_render();
+}
+
+/*
+ * new_activity() — ask for a name, create it, and start marking its first click
+ */
+function new_activity() {
+    const name = prompt('Name of the new activity:', `On ${location.hostname}`);
+    if (name === null) {
+        return;
+    }
+    open_activity(save_activity(activity_create(name.trim() || 'Untitled', location.href)));
+    add_point_step();
+}
+
+/*
+ * play_activity(activity, from) — play an activity from step index from
+ */
+function play_activity(activity, from) {
+    if (activity.steps.length === 0) {
+        toast('Add a click first.');
+        return;
+    }
+    start_run(activity, { step: from || 0 });
+}
+
+// ---------- small pieces ----------
+
+/*
+ * mini_screen(step, tiny) -> a small picture of the window with the step's pixel on it
+ */
+function mini_screen(step, tiny) {
+    const view = view_now();
+    const p = step_point(step, view);
+    const left = clamp(p.x / Math.max(1, view.w), 0, 1) * 100;
+    const top = clamp(p.y / Math.max(1, view.h), 0, 1) * 100;
+    return h('div', { class: tiny ? 'screen tiny' : 'screen', title: `(${Math.round(p.x)}, ${Math.round(p.y)}) in a ${view.w}×${view.h} window` },
+        h('div', { class: 'dot', style: { left: `${left}%`, top: `${top}%` } }));
+}
+
+/*
+ * step_summary(step) -> one line for a closed step: action, then what it waits for
+ */
+function step_summary(step) {
+    const parts = [describe_action(step)];
+    if (step.after.length > 0) {
+        parts.push(`then waits: ${step.after.length === 1 ? CHECKS[step.after[0].kind].label.toLowerCase() : `${step.after.length} checks`}`);
+    }
+    if (step.pause_ms > 0) {
+        parts.push(`pause ${format_ms(step.pause_ms)}`);
+    }
+    return parts.join(' · ');
+}
+
+/*
+ * render_checks(index, which) -> the "before" or "after" checks of a step, editable
+ */
+function render_checks(index, which) {
+    const step = panel.activity.steps[index];
+    const rows = [];
+    const checks = step[which];
+    for (let c = 0; c < checks.length; c++) {
+        const check = checks[c];
+        const k = c;
+        const value = CHECKS[check.kind].value
+            ? (check.kind === 'wait'
+                ? seconds_field(to_number(check.value, 0), function (ms) {
+                    edit_step(index, function (s) { s[which][k].value = String(ms); }, false);
+                })
+                : text_field(check.value, function (v) {
+                    edit_step(index, function (s) { s[which][k].value = v; }, false);
+                }, { placeholder: '*/checkout* or /regex/', class: 'grow' }))
+            : null;
+        const limits = check.kind === 'wait' ? null : h('span', { class: 'row muted' }, 'max',
+            seconds_field(check.timeout_ms, function (ms) {
+                edit_step(index, function (s) { s[which][k].timeout_ms = ms; }, false);
+            }), 's, then',
+            select_field(check.on_timeout, { stop: 'stop', 'continue': 'go on' }, function (v) {
+                edit_step(index, function (s) { s[which][k].on_timeout = v; }, false);
+            }));
+        rows.push(h('div', { class: 'check' },
+            h('span', { class: 'kind' }, CHECKS[check.kind].label, check.kind === 'wait' ? null : h('span', { class: 'muted' }, check_now(check, location.href) ? ' · true now' : '')),
+            value, limits,
+            h('button', {
+                class: 'btn ghost small', title: 'Remove this check',
+                on_click: function () {
+                    edit_step(index, function (s) { s[which].splice(k, 1); }, true);
+                },
+            }, '✕')));
+    }
+    const kinds = { '': which === 'before' ? '＋ Wait before…' : '＋ Wait after…' };
+    for (const kind of Object.keys(CHECKS)) {
+        kinds[kind] = CHECKS[kind].label;
+    }
+    rows.push(select_field('', kinds, function (kind) {
+        if (kind !== '') {
+            edit_step(index, function (s) { s[which].push(check_create(kind)); }, true);
+        }
+    }));
+    return rows;
+}
+
+/*
+ * render_action_fields(index) -> the fields of the step's action (text, key, scroll, hold)
+ */
+function render_action_fields(index) {
+    const step = panel.activity.steps[index];
+    const set = function (field, rerender) {
+        return function (value) {
+            edit_step(index, function (s) { s[field] = value; }, rerender);
+        };
+    };
+    const out = [];
+    if (step.action === 'type') {
+        out.push(h('div', { class: 'row' }, text_field(step.text, set('text', true), { placeholder: 'Text to type', class: 'grow' })),
+            h('label', { class: 'row' }, h('input', {
+                type: 'checkbox', checked: step.clear_first,
+                on_change: function (event) { set('clear_first', false)(event.target.checked); },
+            }), 'Empty the field first'));
+    } else if (step.action === 'key') {
+        out.push(h('div', { class: 'row' }, 'Key', text_field(step.key, set('key', true), { placeholder: 'Enter, Escape, Tab, a…' })));
+    } else if (step.action === 'scroll') {
+        out.push(h('div', { class: 'row' }, 'Down', number_field(step.scroll_dy, set('scroll_dy', true)), 'px, right',
+            number_field(step.scroll_dx, set('scroll_dx', true)), 'px'));
+    } else if (step.action === 'long_press') {
+        out.push(h('div', { class: 'row' }, 'Hold for', seconds_field(step.hold_ms, set('hold_ms', true)), 's'));
+    }
+    if (step.action !== 'wait') {
+        out.push(h('div', { class: 'row' }, 'Do it', number_field(step.repeat, function (n) {
+            set('repeat', true)(clamp(Math.round(n), 1, 1000));
+        }, { min: '1' }), 'time(s), every', seconds_field(step.repeat_pause_ms, set('repeat_pause_ms', false)), 's'));
+    }
+    return out;
+}
+
+/*
+ * render_step_body(index) -> the open step: where, what, how, waits and pause
+ */
+function render_step_body(index) {
+    const step = panel.activity.steps[index];
+    const action_names = {};
+    for (const key of Object.keys(ACTIONS)) {
+        action_names[key] = ACTIONS[key].label;
+    }
+    const sections = [];
+    if (ACTIONS[step.action].point) {
+        const now = step_point(step, view_now());
+        const hit = hit_at(now.x, now.y);
+        sections.push(h('div', { class: 'section' },
+            h('div', { class: 'label' }, 'Where on the screen'),
+            h('div', { class: 'row' }, mini_screen(step, false),
+                h('div', { class: 'grow' },
+                    h('div', { class: 'row' }, 'x', number_field(step.x, function (v) {
+                        edit_step(index, function (s) { s.x = Math.round(v); }, true);
+                    }), 'y', number_field(step.y, function (v) {
+                        edit_step(index, function (s) { s.y = Math.round(v); }, true);
+                    })),
+                    h('button', { class: 'btn small', style: { marginTop: '6px' }, on_click: function () { remark_step(index); } }, '📍 Mark again on the page'))),
+            h('div', { class: 'row', style: { marginTop: '6px' } }, 'Keeps', select_field(step.place, PLACES, function (v) {
+                const view = view_now();
+                edit_step(index, function (s) {
+                    s.place = v;
+                    s.scroll_x = view.scroll_x;
+                    s.scroll_y = view.scroll_y;
+                    s.view_w = view.w;
+                    s.view_h = view.h;
+                }, true);
+            })),
+            h('div', { class: 'hits', style: { marginTop: '6px' } }, 'Right now that pixel is ', h('code', null, describe_target(hit === null ? null : hit.el)),
+                h('div', { class: 'muted' }, `Point: ${describe_place(step)}.`))));
+    }
+    sections.push(h('div', { class: 'section' },
+        h('div', { class: 'label' }, 'What it does'),
+        h('div', { class: 'row' }, select_field(step.action, action_names, function (v) {
+            edit_step(index, function (s) { s.action = v; }, true);
+        }), text_field(step.label, function (v) {
+            edit_step(index, function (s) { s.label = v.trim(); }, true);
+        }, { placeholder: `Name (default "${step_title(Object.assign({}, step, { label: '' }), index)}")`, class: 'grow' })),
+        render_action_fields(index)));
+    sections.push(h('div', { class: 'section' },
+        h('div', { class: 'label' }, 'How'),
+        h('div', { class: 'how' }, describe_how(step))));
+    sections.push(h('div', { class: 'section' },
+        h('div', { class: 'label' }, 'Before it, wait until'),
+        render_checks(index, 'before')));
+    sections.push(h('div', { class: 'section' },
+        h('div', { class: 'label' }, 'After it, wait until'),
+        render_checks(index, 'after')));
+    sections.push(h('div', { class: 'section' },
+        h('div', { class: 'label' }, 'Then pause'),
+        h('div', { class: 'row' }, seconds_field(step.pause_ms, function (ms) {
+            edit_step(index, function (s) { s.pause_ms = ms; }, true);
+        }), 's, give or take', seconds_field(step.jitter_ms, function (ms) {
+            edit_step(index, function (s) { s.jitter_ms = ms; }, false);
+        }), 's at random')));
+    sections.push(h('div', { class: 'row' },
+        h('button', {
+            class: 'btn small', title: 'Do only this step\'s action now, without its waits',
+            on_click: function () {
+                test_step(step).then(function () {
+                    toast(`${step_title(step, index)} done`);
+                }, function (e) {
+                    toast(e.message, { type: 'error' });
+                });
+            },
+        }, '▶ Test this step'),
+        h('button', { class: 'btn small', on_click: function () { play_activity(panel.activity, index); } }, '▶ Play from here'),
+        h('span', { class: 'grow' }),
+        h('button', {
+            class: 'btn small danger',
+            on_click: function () {
+                commit(function (activity) { activity.steps.splice(index, 1); }, false);
+                panel.open_step = -1;
+                panel_render();
+            },
+        }, 'Delete step')));
+    return h('div', { class: 'step-body' }, sections);
+}
+
+/*
+ * render_step(index) -> one step row (and its body when open)
+ */
+function render_step(index) {
+    const step = panel.activity.steps[index];
+    const open = panel.open_step === index;
+    const row = h('div', { class: `step${step.enabled ? '' : ' off'}` },
+        h('div', {
+            class: 'step-head',
+            on_click: function () {
+                panel.open_step = open ? -1 : index;
+                panel_render();
+            },
+        },
+        h('span', { class: 'badge' }, String(index + 1)),
+        ACTIONS[step.action].point ? mini_screen(step, true) : null,
+        h('div', { class: 'what' },
+            h('div', { class: 'title' }, step_title(step, index)),
+            h('div', { class: 'desc' }, step_summary(step))),
+        h('input', {
+            type: 'checkbox', checked: step.enabled, title: 'Play this step',
+            on_click: function (event) { event.stopPropagation(); },
+            on_change: function (event) {
+                edit_step(index, function (s) { s.enabled = event.target.checked; }, true);
+            },
+        }),
+        h('button', { class: 'btn ghost small', title: 'Move up', on_click: function (event) { event.stopPropagation(); move_step(index, -1); } }, '▲'),
+        h('button', { class: 'btn ghost small', title: 'Move down', on_click: function (event) { event.stopPropagation(); move_step(index, 1); } }, '▼')),
+        open ? render_step_body(index) : null);
+    return row;
+}
+
+// ---------- views ----------
+
+/*
+ * render_list() -> the list of this site's activities
+ */
+function render_list() {
+    const list = activities_for(location.href);
+    const cards = [];
+    for (const activity of list) {
+        const a = activity;
+        cards.push(h('div', { class: 'card clickable', on_click: function () { open_activity(a); } },
+            h('div', { class: 'row' },
+                h('h3', { class: 'grow' }, a.name),
+                h('button', {
+                    class: 'btn primary small', title: 'Play',
+                    on_click: function (event) {
+                        event.stopPropagation();
+                        play_activity(a, 0);
+                    },
+                }, '▶')),
+            h('div', { class: 'muted' }, `${a.steps.length} step${a.steps.length === 1 ? '' : 's'} · about ${format_ms(activity_duration(a))} · `
+                + (a.loops === 0 ? 'loops until stopped' : `${a.loops}×`))));
+    }
+    if (cards.length === 0) {
+        cards.push(h('div', { class: 'empty' },
+            h('div', null, h('b', null, 'No activities on this site yet.')),
+            h('div', null, 'An activity is a list of clicks on pixels you mark, with pauses and checks between them.')));
+    }
+    return [h('button', { class: 'btn primary', on_click: new_activity }, '＋ New activity'), cards];
+}
+
+/*
+ * render_detail() -> one activity: settings, then its steps
+ */
+function render_detail() {
+    const a = panel.activity;
+    panel.rows = [];
+    const steps = [];
+    for (let i = 0; i < a.steps.length; i++) {
+        const row = render_step(i);
+        panel.rows.push(row);
+        steps.push(row);
+        if (i < a.steps.length - 1) {
+            steps.push(h('div', { class: 'flow' }, `↓ ${format_ms(a.steps[i].pause_ms)}`));
+        }
+    }
+    if (steps.length === 0) {
+        steps.push(h('div', { class: 'empty' }, 'No steps yet. ', h('b', null, 'Add a click'), ' and then click the spot on the page.'));
+    }
+    return [
+        h('div', { class: 'row' },
+            h('button', { class: 'btn ghost small', on_click: function () { panel.view = 'list'; panel.activity = null; panel_render(); } }, '←'),
+            text_field(a.name, function (v) {
+                commit(function (act) { act.name = v.trim() || 'Untitled'; }, false);
+            }, { class: 'name grow', 'aria-label': 'Activity name' })),
+        h('div', { class: 'row' },
+            h('button', { class: 'btn primary', on_click: function () { play_activity(a, 0); } }, '▶ Play'),
+            h('button', { class: 'btn', on_click: stop_run }, '■ Stop'),
+            h('span', { class: 'grow' }),
+            'Loops', number_field(a.loops, function (n) {
+                commit(function (act) { act.loops = clamp(Math.round(n), 0, 100000); }, true);
+            }, { min: '0', title: '0 = until stopped' }),
+            'every', seconds_field(a.loop_pause_ms, function (ms) {
+                commit(function (act) { act.loop_pause_ms = ms; }, false);
+            }), 's'),
+        h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Runs on'), text_field(a.pages, function (v) {
+            commit(function (act) { act.pages = v.trim() || `${act.site}/*`; }, false);
+        }, { class: 'grow', title: 'Pages this activity is for: a * pattern or /regex/' })),
+        h('div', { class: 'steps' }, steps),
+        h('div', { class: 'row' },
+            h('button', { class: 'btn primary', on_click: add_point_step }, '＋ Add click (mark on page)'),
+            select_field('', { '': '＋ Other step…', wait: 'Only wait', key: 'Press a key' }, function (v) {
+                if (v !== '') {
+                    add_other_step(v);
+                }
+            })),
+    ];
+}
+
+/*
+ * render_transfer() -> export / import as JSON
+ */
+function render_transfer() {
+    const area = h('textarea', { spellcheck: 'false' }, export_activities(activities_for(location.href)));
+    return [
+        h('div', { class: 'row' },
+            h('button', { class: 'btn ghost small', on_click: function () { panel.view = 'list'; panel_render(); } }, '←'),
+            h('b', null, 'Export / import')),
+        h('div', { class: 'muted' }, 'This site\'s activities as JSON. Copy it to keep or share; paste JSON here and click Import to add activities.'),
+        area,
+        h('div', { class: 'row' },
+            h('button', {
+                class: 'btn',
+                on_click: function () {
+                    navigator.clipboard.writeText(area.value).then(function () { toast('Copied'); });
+                },
+            }, 'Copy'),
+            h('button', {
+                class: 'btn primary',
+                on_click: function () {
+                    try {
+                        toast(`Imported ${import_activities(area.value)} activities`);
+                        panel.view = 'list';
+                        panel_render();
+                    } catch (e) {
+                        toast(`Import failed: ${e.message}`, { type: 'error' });
+                    }
+                },
+            }, 'Import')),
+    ];
+}
+
+/*
+ * panel_render() — draw the panel for the current view
+ */
+function panel_render() {
+    if (!panel.prefs.open) {
+        return;
+    }
+    if (panel.layer === null) {
+        panel.layer = layer_create('panel', PANEL_CSS);
+    }
+    if (panel.view === 'detail' && panel.activity !== null) {
+        panel.activity = load_activity(panel.activity.id);
+        if (panel.activity === null) {
+            panel.view = 'list';
+        }
+    }
+    let body = null;
+    if (panel.view === 'detail') {
+        body = render_detail();
+    } else if (panel.view === 'transfer') {
+        body = render_transfer();
+    } else {
+        body = render_list();
+    }
+    panel.status = h('div', { class: 'status', hidden: true }, h('span', { class: 'text' }), h('button', { class: 'btn small', on_click: stop_run }, '■ Stop'));
+    const side = panel.prefs.side;
+    const root = h('div', { class: `fm panel ${side}` },
+        h('div', { class: 'head' },
+            h('span', { class: 'logo' }, 'follow', h('b', null, 'Me')),
+            h('span', { class: 'site grow' }, location.hostname),
+            h('button', {
+                class: 'btn ghost small', title: 'Move to the other side',
+                on_click: function () {
+                    panel.prefs.side = side === 'right' ? 'left' : 'right';
+                    save_prefs(panel.prefs);
+                    panel_render();
+                    tab_render();
+                },
+            }, '⇆'),
+            h('button', { class: 'btn ghost small', title: 'Close (Alt+Shift+P)', on_click: panel_close }, '✕')),
+        h('div', { class: 'body' }, body),
+        panel.status,
+        h('div', { class: 'foot' },
+            h('label', { class: 'row' }, h('input', {
+                type: 'checkbox', checked: panel.prefs.show_marks,
+                on_change: function (event) {
+                    panel.prefs.show_marks = event.target.checked;
+                    save_prefs(panel.prefs);
+                    show_marks();
+                },
+            }), 'Show marks'),
+            h('span', { class: 'grow' }),
+            h('button', { class: 'btn small', on_click: function () { panel.view = 'transfer'; panel_render(); } }, 'Export / import')));
+    panel.layer.root.replaceChildren(h('style', null, BASE_CSS + PANEL_CSS), root);
+    show_marks();
+    if (current_run !== null) {
+        render_status(current_run);
+    }
+}
+
+/*
+ * render_status(run) — the status bar and the playing step, without redrawing the panel
+ */
+function render_status(run) {
+    const playing = ['before', 'action', 'after', 'pause'].indexOf(run.phase) >= 0 && !run.stopped;
+    if (panel.status !== null) {
+        panel.status.hidden = false;
+        panel.status.className = `status ${run.phase}`;
+        const left = run.left_ms > 0 ? ` · ${format_ms(run.left_ms)}` : '';
+        const loop = run.activity.loops === 1 ? '' : ` [loop ${run.loop + 1}${run.activity.loops === 0 ? '' : `/${run.activity.loops}`}]`;
+        panel.status.firstChild.textContent = `${playing ? '▶ ' : ''}${run.text}${left}${loop}`;
+        panel.status.lastChild.hidden = !playing;
+    }
+    const same = panel.view === 'detail' && panel.activity !== null && panel.activity.id === run.activity.id;
+    for (let i = 0; i < panel.rows.length; i++) {
+        panel.rows[i].classList.toggle('current', same && playing && i === run.step);
+    }
+    if (playing) {
+        if (!same || !panel.prefs.open) {
+            marks_set(run.activity, -1, null);
+        }
+        marks_active(run.step);
+    } else {
+        marks_active(-1);
+        show_marks();
+    }
+    tab_render();
+}
+
+// ---------- the edge tab ----------
+
+let tab_layer = null;
+
+/*
+ * tab_render() — the small tab on the window's edge that opens the panel
+ */
+function tab_render() {
+    if (panel.prefs.open) {
+        if (tab_layer !== null) {
+            layer_remove(tab_layer);
+            tab_layer = null;
+        }
+        return;
+    }
+    if (tab_layer === null) {
+        tab_layer = layer_create('tab', TAB_CSS);
+    }
+    const side = panel.prefs.side;
+    tab_layer.root.replaceChildren(h('style', null, BASE_CSS + TAB_CSS), h('div', { class: 'fm' },
+        h('button', {
+            class: `tab ${side}${is_running() ? ' running' : ''}`,
+            title: is_running() ? 'followMe is playing — click to open (Esc stops)' : 'followMe (Alt+Shift+P)',
+            style: { top: `calc(${clamp(panel.prefs.tab_y, 0, 1) * 100}% - 32px)` },
+            on_click: panel_toggle,
+        }, 'followMe')));
+}
+
+// ---------- src/main.js ----------
+
+/*
+ * Starting followMe on a page: the edge tab, the panel if it was left open, the
+ * Alt+Shift+P shortcut, Esc to stop a run, the menu command, keeping the panel in step
+ * with other tabs, and carrying on a run that a page load interrupted.
+ */
+
+/*
+ * on_key(event) — Alt+Shift+P opens / closes the panel; Esc stops a playing run
+ */
+function on_key(event) {
+    if (event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyP') {
+        event.preventDefault();
+        panel_toggle();
+        return;
+    }
+    if (event.key === 'Escape' && is_running()) {
+        stop_run();
+        toast('followMe stopped');
+    }
+}
+
+/*
+ * main() — start followMe on this page
+ */
+async function main() {
+    panel.prefs = load_prefs();
+    on_run_change(render_status);
+    document.addEventListener('keydown', on_key, true);
+    GM_registerMenuCommand('followMe: open / close the panel', panel_toggle);
+    GM_registerMenuCommand('followMe: stop playing', stop_run);
+    GM_addValueChangeListener(ACTIVITIES_KEY, function (key, old_value, new_value, remote) {
+        if (remote && panel.prefs.open) {
+            panel_render(); // changed in another tab
+        }
+    });
+    tab_render();
+    if (panel.prefs.open) {
+        panel_render();
+    }
+    const resumed = await resume_saved_run();
+    if (resumed !== null && resumed.error !== '') {
+        toast(resumed.error, { type: 'error' });
+    }
+}
+
+main();

@@ -382,7 +382,7 @@ If it all fits on one page you also get *Copy Image & Open New Chat*.
 Tampermonkey does not exist on most mobile browsers, so AiUtil can also be
 packed into a single `javascript:` bookmark.
 
-### ▸ [**Open the bookmarklet builder**](bookmarklet.html)
+### ▸ [**Open the bookmarklet builder**](../bookmarklet.html)
 
 `bookmarklet.html` sits next to this file in the repo. Open it, load `AiUtil.js`
 (button, file picker, or paste), press **Build bookmarklet**, then **Copy**.

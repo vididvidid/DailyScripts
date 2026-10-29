@@ -1,0 +1,12 @@
+// ==Moss==
+// name:        followMe
+// namespace:   https://github.com/vididvidid/DailyScripts
+// version:     0.1.0
+// description: Tap-by-pixel automation for any website: mark points on the page, chain clicks with pauses and "page loaded" / "URL changed" checks, and replay them. No selectors, no Puppeteer.
+// author:      vididvidid
+// homepage:    https://github.com/vididvidid/DailyScripts/tree/main/followMe
+// match:       *://*/*
+// noframes:
+// run-at:      document-idle
+// use:         moss/ui/toast as toast
+// ==/Moss==

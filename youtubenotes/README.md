@@ -216,7 +216,7 @@ are just arrays, so put your own categories in them.
 
 Mobile Chrome has no extensions, but it does have bookmarks — and a bookmark
 whose URL starts with `javascript:` runs against whatever page you are looking
-at. [`bookmarklet.html`](bookmarklet.html) packs this whole script into one of
+at. [`bookmarklet.html`](../bookmarklet.html) packs this whole script into one of
 those.
 
 **Build it** (once, on a desktop):
@@ -280,6 +280,6 @@ All of it is also on the Tampermonkey menu for the script.
 
 ## Install
 
-See the [Tampermonkey setup guide in the main README](README.md#installation).
+See the [Tampermonkey setup guide in the main README](../README.md#installation).
 Point the stub's `@require` at your local copy of `youtubenotes.js`, and keep the
 `GM_xmlhttpRequest` / `@connect api.github.com` lines if you want gist sync.
