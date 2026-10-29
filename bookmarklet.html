@@ -115,7 +115,7 @@
 (function () {
   const $ = (id) => document.getElementById(id);
   const TERSER = "https://cdn.jsdelivr.net/npm/terser@5.31.6/dist/bundle.min.js";
-  const FALLBACK_SCRIPTS = ["AiUtil.js", "youtubenotes.js"];
+  const FALLBACK_SCRIPTS = ["AiUtil/AiUtil.js", "youtubenotes/youtubenotes.js"];
 
   let source = "";     // the loaded script text
   let sourceName = ""; // what it was called, for the storage namespace
@@ -139,15 +139,16 @@
     let names = null;
     if (info) {
       try {
+        // Each script lives in its own folder as <name>/<name>.js.
         const res = await fetch(
-          `https://api.github.com/repos/${info.owner}/${info.repo}/contents/`,
+          `https://api.github.com/repos/${info.owner}/${info.repo}/git/trees/HEAD?recursive=1`,
           { headers: { Accept: "application/vnd.github+json" } },
         );
         if (res.ok) {
-          const files = await res.json();
-          names = files
-            .filter((f) => f.type === "file" && /\.js$/i.test(f.name))
-            .map((f) => f.name)
+          const tree = (await res.json()).tree || [];
+          names = tree
+            .filter((f) => f.type === "blob" && /^([^/]+)\/\1\.js$/.test(f.path))
+            .map((f) => f.path)
             .sort();
         }
       } catch (e) { /* offline, rate-limited, or a private repo — fall through */ }
@@ -176,7 +177,9 @@
 
   function accept(text, name) {
     source = text;
-    sourceName = name;
+    // Just the file name: a bookmarklet's saved data is keyed by it, so it stays the
+    // same whether the script was loaded as "AiUtil.js" or "AiUtil/AiUtil.js".
+    sourceName = name.split("/").pop();
     $("btn-build").disabled = source.trim().length < 40;
     say($("src-note"), `Loaded ${name} — ${kb(source.length)}.`, "ok");
     buildReport();

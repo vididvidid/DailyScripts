@@ -1,0 +1,12 @@
+{
+  "name": "followme",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tap-by-pixel website automation for Moss: mark points, chain clicks with pauses and page checks, replay them.",
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node --test tests/",
+    "check": "node tools/build.mjs --check && for f in $(find src tools tests -name '*.js' -o -name '*.mjs'); do node --check \"$f\" || exit 1; done"
+  }
+}

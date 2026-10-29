@@ -25,7 +25,7 @@
  *                storage, certificate expiry and lifetime, CAA, DMARC,
  *                MTA-STS, TLS-RPT, Encrypted Client Hello, HTTP/3, and
  *                3DES / DES / RC4 in scripts; the grade circle is labelled;
- *                tinkatuff-demo/ — a local page with every flaw planted
+ *                tinkatuff/demo/ — a local page with every flaw planted
  *
  * 0.3.0          easier to read and nicer to look at:
  *                - the report opens with a plain-language summary — one

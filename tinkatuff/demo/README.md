@@ -4,7 +4,7 @@ A local page with every kind of flaw tinkatuff looks for planted on purpose, so
 you can see the full report without pointing it at anyone else's site.
 
 ```bash
-cd tinkatuff-demo
+cd tinkatuff/demo
 python3 -m http.server 8765
 ```
 

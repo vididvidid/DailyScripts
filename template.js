@@ -10,7 +10,7 @@
  * - Every script in this repo carries its own header, so there is nothing to paste
  *   here. In the Moss dashboard: + Script (or open the script), then
  *   Options → Source → "Link a local file…" and pick the file — on Windows Chrome
- *   that can be \\wsl.localhost\Ubuntu\home\kali\DailyScripts\youtubenotes.js.
+ *   that can be \\wsl.localhost\Ubuntu\home\kali\DailyScripts\youtubenotes\youtubenotes.js.
  * - Moss reloads the script every time you save the file, while a Moss page (the
  *   dashboard) is open. After a browser restart, click Reconnect once.
  * - To track the published version instead: Import… → paste the GitHub link, with
@@ -20,7 +20,7 @@
  * - chrome://extensions → Tampermonkey → allow access to file URLs, and in its
  *   dashboard → Settings → Config mode = Advanced → Externals = Always.
  * - Add a line under @match:
- *       // @require  file:////wsl.localhost/Ubuntu/home/kali/DailyScripts/[FILE_NAME].js
+ *       // @require  file:////wsl.localhost/Ubuntu/home/kali/DailyScripts/[NAME]/[NAME].js
  *   and keep this file's body empty. (Moss can't read file:// URLs — use the
  *   local-file link above there.)
  *
