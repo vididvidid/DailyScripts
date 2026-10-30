@@ -24,7 +24,9 @@
  *     label: string;           optional name ("Open menu"); empty = "Click 3"
  *     action: 'click' | 'double_click' | 'right_click' | 'long_press' | 'type' | 'key' | 'scroll' | 'read' | 'side' | 'wait';
  *     x, y: number;            where it was marked, in CSS pixels of the visible page
- *     place: 'screen' | 'page' | 'scaled';   how x, y follow scrolling and resizing
+ *     place: 'element' | 'screen' | 'page' | 'scaled';   how x, y follow layout changes,
+ *                              scrolling and resizing ('element': see anchor.js)
+ *     anchor: struct anchor | null;   'element': the element under the point
  *     scroll_x, scroll_y: number;   page scroll when it was marked ('page')
  *     view_w, view_h: number;       window size when it was marked ('scaled')
  *     text: string;            'type': what to type; {name} puts in a value read earlier
@@ -89,6 +91,7 @@ const CHECKS = {
 };
 
 const PLACES = {
+    element: 'Follows the element there (moves with the layout)',
     screen: 'Same spot on the screen',
     page: 'Same spot on the page (follows scrolling)',
     scaled: 'Same spot relative to the window size',
@@ -104,7 +107,7 @@ const DEFAULT_TIMEOUT = 30000;
 // Fields added after 0.1.0, filled in on activities and steps stored before.
 const ACTIVITY_DEFAULTS = { start_url: '', device: 'desktop', orientation: 'portrait', need_online: true, offline: 'wait', unsaved: [] };
 const STEP_DEFAULTS = {
-    type_into: 'point', type_mode: 'paste', key_delay_ms: 60, enter_after: false,
+    type_into: 'point', type_mode: 'paste', key_delay_ms: 60, enter_after: false, anchor: null,
     var_name: 'answer', read_pattern: '', side_activity: '', side_url: '', side_how: 'auto', side_place: 'right',
     side_timeout_ms: 120000, side_close: true,
 };
@@ -142,7 +145,8 @@ function step_create(x, y, view) {
         action: 'click',
         x: Math.round(x),
         y: Math.round(y),
-        place: 'screen',
+        place: 'element',
+        anchor: null,
         scroll_x: Math.round(view.scroll_x),
         scroll_y: Math.round(view.scroll_y),
         view_w: Math.round(view.w),
@@ -350,6 +354,9 @@ function side_target(step) {
  * describe_place(step) -> how the point follows scrolling or resizing
  */
 function describe_place(step) {
+    if (step.place === 'element') {
+        return 'it follows the element marked there, wherever the layout moves it (pinning, resizing, banners); without one, the pixel';
+    }
     if (step.place === 'page') {
         return `on the page: marked with the page scrolled to (${step.scroll_x}, ${step.scroll_y}); it scrolls there if needed`;
     }

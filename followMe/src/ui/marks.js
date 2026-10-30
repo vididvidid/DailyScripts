@@ -111,7 +111,7 @@ function marks_render() {
         if (!step_has_point(step)) {
             continue;
         }
-        const p = step_point(step, view);
+        const p = point_of(step);
         if (prev !== null && step.enabled) {
             const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
             line.setAttribute('x1', prev.x);

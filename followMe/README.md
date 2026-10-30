@@ -35,7 +35,7 @@ the window. Click it, or press **Alt+Shift+P**, to open the side panel.
 
 | section | what you set |
 |---|---|
-| **Where on the screen** | the pixel (x, y), a small map of the window with the point on it, **📍 Mark again**, what is at that pixel right now (`button "Checkout"`), and how the point follows the page: **same spot on the screen**, **on the page** (follows scrolling; it scrolls there first), or **relative to the window size** |
+| **Where on the screen** | the pixel (x, y), a small map of the window with the point on it, **📍 Mark again**, what is at that pixel right now (`button "Checkout"`), and how the point follows the page: **follows the element there** (default, see below), **same spot on the screen**, **on the page** (follows scrolling; it scrolls there first), or **relative to the window size** |
 | **What it does** | left / double / right click, long press, type text (optionally clearing the field first), press a key, scroll, **read text**, **run on another site**, or only wait; repeat it *n* times with a gap |
 | **How** | a plain description of the events it sends |
 | **Before it, wait until** / **After it, wait until** | **Page fully loaded**, **URL changed**, **URL matches** `*glob*` or `/regex/`, **Internet is on**, **Wait a fixed time**. Each has a time limit and either *stop* or *go on* when that runs out |
@@ -68,6 +68,28 @@ is a `<textarea>`, and this covers it.
 
 The status bar shows what it is doing, for example "Checkout: waiting until the URL has
 changed · 12 s". The step that is playing is outlined, and its mark pulses.
+
+### Points that follow the page
+
+A bare pixel breaks as soon as the layout moves. Pinning the side panel makes the page
+narrower; a centred site moves sideways in a different window size; a banner pushes
+everything down. So when you mark a point, followMe also notes **the element drawn
+there** and where inside it you clicked (e.g. 30% across, halfway down). When the step
+plays, it finds that element again and clicks the same spot inside it, wherever it is
+now. You still only mark pixels; nothing to set up.
+
+It finds the element by its place in the page (from the nearest stable `id`), checks
+that it still says the same thing, and otherwise looks for the element of that kind
+with the same label or text nearest to the old spot. If it's gone, it uses your
+original pixel. An open step says what it follows, for example *Follows button
+"Checkout" — found ✓*. That's **Keeps → Follows the element there**, the default for
+new points. The old modes (same spot on the screen / on the page / relative to the
+window) are still there.
+
+Points made before 0.4 sit on fixed pixels. An activity with such points shows **Make
+them follow**. Click it while the page is laid out the way it was when you marked them
+(for example, unpinned), so each point grabs the right element. **Move all points**
+shifts every point by a few pixels at once.
 
 ### The checks
 
@@ -215,6 +237,7 @@ src/core/gist.js       GitHub gist sync and backup (one file per activity, merge
 src/core/net.js        is the internet on (navigator.onLine + a probe through GM_xmlhttpRequest)
 src/core/device.js     desktop / mobile / tablet view through Moss's GM_device
 src/core/checks.js     page loaded / URL changed / URL matches / internet on / wait
+src/core/anchor.js     points that follow their element (find it again after layout changes)
 src/core/clicker.js    pixel → element, pointer/mouse/touch/key events, typing, scrolling, reading text
 src/core/runner.js     playing, loops, pauses, stop, resume after a page load, device switch,
                        internet gate, other-site steps (GM_split)
