@@ -1060,25 +1060,37 @@ function render_sync() {
         },
     }, '⬇ Download a backup file');
     if (!gist_ready()) {
-        const token = h('input', { type: 'password', placeholder: 'GitHub token (ghp_… or github_pat_…)', class: 'grow', autocomplete: 'off' });
+        // A text field that only looks masked: Chrome's password manager leaves it
+        // alone (a real password field can get a saved password filled in instead).
+        const token = h('input', {
+            type: 'text', placeholder: 'GitHub token (ghp_… or github_pat_…)', class: 'grow secret', autocomplete: 'off',
+            spellcheck: 'false', 'data-lpignore': 'true', 'data-1p-ignore': 'true', 'data-form-type': 'other',
+        });
+        const reveal = h('button', {
+            class: 'btn small ghost', title: 'Show / hide the token',
+            on_click: function () {
+                token.classList.toggle('secret');
+            },
+        }, '👁');
         const id = h('input', { type: 'text', placeholder: 'Gist id or URL (empty = find or make one)', class: 'grow', spellcheck: 'false' });
         const connect = h('button', {
             class: 'btn primary',
             on_click: function () {
-                if (token.value.trim() === '') {
-                    toast('Paste a token first.', { type: 'error' });
+                const problem = token_problem(clean_token(token.value));
+                if (problem !== '') {
+                    toast(problem, { type: 'error', timeout: 9000 });
                     return;
                 }
                 connect.disabled = true;
                 connect.textContent = 'Connecting…';
-                gist_connect(token.value.trim(), id.value).then(function (c) {
+                gist_connect(token.value, id.value).then(function (c) {
                     toast('Connected — your activities are in the gist');
                     panel_render();
                     return c;
                 }, function (e) {
                     connect.disabled = false;
                     connect.textContent = 'Connect';
-                    toast(e.message, { type: 'error' });
+                    toast(e.message, { type: 'error', timeout: 12000 });
                 });
             },
         }, 'Connect');
@@ -1090,10 +1102,10 @@ function render_sync() {
             h('ol', { class: 'muted howto' },
                 h('li', null, 'On GitHub: Settings → Developer settings → Personal access tokens → ',
                     h('a', { href: 'https://github.com/settings/tokens/new?scopes=gist&description=followMe', target: '_blank', rel: 'noopener' }, 'new token (classic)'),
-                    ' with only the ', h('b', null, 'gist'), ' scope.'),
+                    ' with only the ', h('b', null, 'gist'), ' scope. (A fine-grained token works too: Account permissions → Gists → Read and write.)'),
                 h('li', null, 'Paste it here. Leave the gist empty: followMe finds your followMe gist, or makes a new private one.'),
                 h('li', null, 'On another computer, paste the same token to get the same activities.')),
-            h('div', { class: 'row' }, token),
+            h('div', { class: 'row' }, token, reveal),
             h('div', { class: 'row' }, id),
             h('div', { class: 'row' }, connect),
             h('div', { class: 'muted' }, 'The token is kept in Moss\'s storage for this script on this computer.'),

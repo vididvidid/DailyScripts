@@ -189,8 +189,11 @@ top of the activity). Save marks it saved and updates the gist.
 gist, with one readable file per activity:
 
 1. Make a [token (classic) with only the `gist` scope](https://github.com/settings/tokens/new?scopes=gist&description=followMe)
-   and paste it there. Leave the gist id empty: followMe finds your followMe gist, or
-   makes a new private one.
+   and paste it there. A fine-grained token works too (Account permissions → **Gists** →
+   Read and write). Leave the gist id empty: followMe finds your followMe gist, or
+   makes a new private one. It checks the token with GitHub first. If GitHub rejects
+   it, the message shows how the token it received starts and how long it is, so you
+   can spot a cut-off copy, and it tells you when the "gist" scope is missing.
 2. The gist is updated when you press **Save**, add a step, delete an activity, or
    import. It is read when followMe starts on a page (at most once a minute). Per
    activity, the newer copy wins, and a deletion wins over anything older.
