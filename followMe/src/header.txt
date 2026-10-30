@@ -1,7 +1,7 @@
 // ==Moss==
 // name:        followMe
 // namespace:   https://github.com/vididvidid/DailyScripts
-// version:     0.2.0
+// version:     0.3.0
 // description: Tap-by-pixel automation for any website: mark points on the page, chain clicks with pauses and "page loaded" / "URL changed" / "internet is on" checks, play them as desktop, mobile or tablet, hand off to another site in split view, and replay them. No selectors, no Puppeteer.
 // author:      vididvidid
 // homepage:    https://github.com/vididvidid/DailyScripts/tree/main/followMe
@@ -13,6 +13,10 @@
 //   - GM_xmlhttpRequest
 //   - GM_device
 //   - GM_split
+// connect:
 // # the internet check asks this page
-// connect:     www.gstatic.com
+//   - www.gstatic.com
+// # gist sync
+//   - api.github.com
+//   - gist.githubusercontent.com
 // ==/Moss==

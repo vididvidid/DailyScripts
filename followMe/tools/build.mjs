@@ -12,6 +12,7 @@ export const ORDER = [
     'src/core/util.js',
     'src/core/steps.js',
     'src/core/store.js',
+    'src/core/gist.js',
     'src/core/net.js',
     'src/core/device.js',
     'src/core/checks.js',

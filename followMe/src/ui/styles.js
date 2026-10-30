@@ -44,6 +44,13 @@ const PANEL_CSS = `
 @media (max-width: 600px) {
   .panel, .panel.left, .panel.right { left: 0; right: 0; top: auto; width: auto; height: 55vh; border: 0; border-top: 1px solid var(--line); border-radius: 12px 12px 0 0; }
 }
+.unsaved { margin-left: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); }
+.note { padding: 6px 8px; border-radius: 6px; background: var(--bg2); } .note.bad { color: var(--bad); }
+.howto { margin: 0; padding-left: 18px; } .howto a { color: var(--accent); }
+a.btn { text-decoration: none; color: inherit; display: inline-block; }
+/* In Chrome's side panel: fill it (and never become the phone-width bottom sheet). */
+.panel.in-side, .panel.in-side.left, .panel.in-side.right { position: fixed !important; inset: 0 !important; width: auto !important;
+  height: auto !important; max-width: none !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
 .net { border: 0; background: transparent; font-size: 11px; color: var(--muted); padding: 2px 4px; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .net::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .net.on::before { background: var(--ok); } .net.off { color: var(--bad); } .net.off::before { background: var(--bad); }
@@ -56,6 +63,7 @@ const PANEL_CSS = `
 .status.done { background: var(--bg2); } .status.failed { background: #ffe3e3; color: #a51d1d; }
 @media (prefers-color-scheme: dark) { .status.failed { background: #3b1e1e; color: #ffb3b3; } }
 .status .text { flex: 1; }
+.status[hidden] { display: none; }
 .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--bg); }
 .card.clickable { cursor: pointer; } .card.clickable:hover { border-color: var(--accent); }
 .card h3 { margin: 0; font-size: 14px; }

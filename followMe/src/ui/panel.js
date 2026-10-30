@@ -6,11 +6,15 @@
  *             on the screen (a small map of the window, the pixel, what is there right
  *             now), what it does, how it does it, what it waits for before and after,
  *             and the break before the next step.
- * Plus a third, 'transfer', for exporting and importing activities as JSON.
+ * Plus 'transfer', for exporting and importing activities as JSON, and 'sync', for the
+ * GitHub gist that keeps them all.
+ *
+ * Every change is kept at once (nothing is lost if you forget to save). A step changed
+ * since the last Save shows "unsaved"; Save marks it saved and updates the gist.
  *
  * struct panel (one, below) {
  *     layer: struct layer | null;
- *     view: 'list' | 'detail' | 'transfer';
+ *     view: 'list' | 'detail' | 'transfer' | 'sync';
  *     activity: struct activity | null;   the one open in 'detail'
  *     open_step: number;                  step whose details are shown, or -1
  *     prefs: struct prefs;
@@ -18,10 +22,20 @@
  *     rows: HTMLElement[];                step rows, to mark the playing one
  *     hidden: boolean;                    hidden while marking a point
  *     net: HTMLElement | null;            the "online / offline" light in the header
+ *     cloud: HTMLElement | null;          the gist button in the footer
+ *     side: GM_sidePanel handle | null;   mirroring the panel into Chrome's side panel
+ *     side_shown: boolean;                the side panel shows it (the page doesn't)
  * }
+ *
+ * Pinned (prefs.pinned), the panel is drawn the same way but shown in Chrome's side
+ * panel through Moss (GM_sidePanel): next to the page instead of over it, and full size
+ * even while the tab is shown as a phone. Its clicks come back here and run as usual.
  */
 
-const panel = { layer: null, view: 'list', activity: null, open_step: -1, prefs: null, status: null, rows: [], hidden: false, net: null };
+const panel = {
+    layer: null, view: 'list', activity: null, open_step: -1, prefs: null, status: null, rows: [], hidden: false, net: null, cloud: null,
+    side: null, side_shown: false,
+};
 
 // ---------- opening and closing ----------
 
@@ -39,6 +53,10 @@ function panel_open() {
  * panel_close() — hide the panel (and the marks, unless a run is playing)
  */
 function panel_close() {
+    if (panel.side_shown) {
+        unpin();
+        return;
+    }
     panel.prefs.open = false;
     save_prefs(panel.prefs);
     if (panel.layer !== null) {
@@ -62,6 +80,79 @@ function panel_toggle() {
     }
 }
 
+/*
+ * panel_visible() -> true if the panel is to be drawn (in the page or the side panel)
+ */
+function panel_visible() {
+    return panel.prefs.open || panel.side_shown;
+}
+
+// ---------- the side panel ----------
+
+/*
+ * side_start() — offer the panel to Moss's side panel (shown once that is open)
+ */
+function side_start() {
+    if (panel.side === null && typeof GM_sidePanel !== 'undefined') {
+        panel.side = GM_sidePanel.mirror(panel.layer === null ? null : panel.layer.root, { title: 'followMe', on_show: side_on_show });
+    }
+}
+
+/*
+ * side_on_show(shown) — the side panel started or stopped showing the panel
+ */
+function side_on_show(shown) {
+    panel.side_shown = shown;
+    if (shown) {
+        panel_render();
+    } else if (panel.layer !== null) {
+        if (panel.prefs.open) {
+            panel_render();
+        } else {
+            layer_remove(panel.layer);
+            panel.layer = null;
+        }
+    }
+    tab_render();
+}
+
+/*
+ * pin() — move the panel into Chrome's side panel
+ */
+function pin() {
+    if (typeof GM_sidePanel === 'undefined') {
+        toast('Pinning needs a Moss with the side panel (Moss 0.2+).', { type: 'error' });
+        return;
+    }
+    panel.prefs.pinned = true;
+    save_prefs(panel.prefs);
+    side_start();
+    panel.side.open().then(function () {
+        toast('Pinned: followMe is in the side panel');
+    }, function (e) {
+        toast(`Pinned. ${e.message}`, { type: 'error', timeout: 9000 });
+    });
+}
+
+/*
+ * unpin() — back into the page
+ */
+function unpin() {
+    panel.prefs.pinned = false;
+    panel.prefs.open = true;
+    save_prefs(panel.prefs);
+    if (panel.side !== null) {
+        const side = panel.side;
+        panel.side = null;
+        side.close().catch(function () {}).then(function () {
+            return side.stop();
+        }).catch(function () {});
+    }
+    panel.side_shown = false;
+    panel_render();
+    tab_render();
+}
+
 // ---------- editing the open activity ----------
 
 /*
@@ -83,7 +174,54 @@ function commit(change, rerender) {
 function edit_step(index, change, rerender) {
     commit(function (activity) {
         change(activity.steps[index]);
+        mark_unsaved(activity, activity.steps[index].id);
     }, rerender);
+}
+
+/*
+ * edit_settings(change, rerender) — commit a change to the activity's own settings
+ */
+function edit_settings(change, rerender) {
+    commit(function (activity) {
+        change(activity);
+        mark_unsaved(activity, '');
+    }, rerender);
+}
+
+/*
+ * mark_unsaved(activity, id) — note that a step ('' = the settings) changed since Save
+ */
+function mark_unsaved(activity, id) {
+    if (activity.unsaved.indexOf(id) < 0) {
+        activity.unsaved.push(id);
+    }
+}
+
+/*
+ * save_now() — Save: everything in the open activity counts as saved, and the gist is
+ *   updated
+ */
+function save_now() {
+    commit(function (activity) {
+        activity.unsaved = [];
+    }, true);
+    if (!gist_ready()) {
+        toast('Saved. (Connect a GitHub gist under ☁ Gist to keep a backup there too.)');
+        return;
+    }
+    toast('Saved — updating the gist…');
+    gist_sync().then(function () {
+        toast('Saved and synced to the gist');
+    }, function (e) {
+        toast(`Saved here, but the gist sync failed: ${e.message}`, { type: 'error' });
+    });
+}
+
+/*
+ * steps_changed() — a step was added or removed: keep it, and update the gist
+ */
+function steps_changed() {
+    gist_sync_soon();
 }
 
 /*
@@ -125,7 +263,7 @@ async function with_panel_hidden(task) {
     } finally {
         panel.hidden = false;
         if (panel.layer !== null) {
-            panel.layer.host.style.display = '';
+            panel.layer.host.style.display = panel.side_shown ? 'none' : '';
         }
     }
 }
@@ -150,8 +288,49 @@ async function add_point_step(action) {
     commit(function (activity) {
         activity.steps.splice(at, 0, step);
     }, false);
+    steps_changed();
     panel.open_step = at;
     panel_render();
+    if (step.action === 'type') {
+        focus_type_text();
+    }
+}
+
+/*
+ * add_type_step() — add "type text": into the field the step before clicks, or, when
+ *   there is no click before it, into a field you mark on the page
+ */
+function add_type_step() {
+    const at = panel.open_step >= 0 ? panel.open_step + 1 : panel.activity.steps.length;
+    const before = at > 0 ? panel.activity.steps[at - 1] : null;
+    if (before === null || before.action !== 'click') {
+        add_point_step('type');
+        return;
+    }
+    const step = step_create(0, 0, view_now());
+    step.action = 'type';
+    step.type_into = 'focused';
+    step.pause_ms = 500;
+    commit(function (activity) {
+        activity.steps.splice(at, 0, step);
+    }, false);
+    steps_changed();
+    panel.open_step = at;
+    panel_render();
+    focus_type_text();
+}
+
+/*
+ * focus_type_text() — put the cursor in the open step's "Text to type" box
+ */
+function focus_type_text() {
+    if (panel.layer === null) {
+        return;
+    }
+    const box = panel.layer.root.querySelector('.step-body input[placeholder="Text to type"]');
+    if (box !== null) {
+        box.focus();
+    }
 }
 
 /*
@@ -164,6 +343,7 @@ function add_other_step(action) {
     commit(function (activity) {
         activity.steps.splice(at, 0, step);
     }, false);
+    steps_changed();
     panel.open_step = at;
     panel_render();
 }
@@ -340,12 +520,28 @@ function render_action_fields(index) {
         };
     };
     const out = [];
+    const check = function (field, label) {
+        return h('label', { class: 'row' }, h('input', {
+            type: 'checkbox', checked: step[field],
+            on_change: function (event) { set(field, true)(event.target.checked); },
+        }), label);
+    };
     if (step.action === 'type') {
         out.push(h('div', { class: 'row' }, text_field(step.text, set('text', true), { placeholder: 'Text to type', class: 'grow' })),
-            h('label', { class: 'row' }, h('input', {
-                type: 'checkbox', checked: step.clear_first,
-                on_change: function (event) { set('clear_first', false)(event.target.checked); },
-            }), 'Empty the field first'));
+            h('div', { class: 'row' }, 'Into', select_field(step.type_into, TYPE_INTO, function (v) {
+                const view = view_now();
+                edit_step(index, function (s) {
+                    s.type_into = v;
+                    if (v === 'point' && s.x === 0 && s.y === 0) {
+                        s.x = Math.round(view.w / 2);
+                        s.y = Math.round(view.h / 2);
+                    }
+                }, true);
+            })),
+            h('div', { class: 'row' }, 'Type it', select_field(step.type_mode, TYPE_MODES, set('type_mode', true)),
+                step.type_mode === 'keys' ? ['every', seconds_field(step.key_delay_ms, set('key_delay_ms', false)), 's'] : null),
+            check('clear_first', 'Empty the field first'),
+            check('enter_after', 'Press Enter after typing (submits a search box)'));
     } else if (step.action === 'key') {
         out.push(h('div', { class: 'row' }, 'Key', text_field(step.key, set('key', true), { placeholder: 'Enter, Escape, Tab, a…' })));
     } else if (step.action === 'scroll') {
@@ -423,7 +619,7 @@ function render_step_body(index) {
         action_names[key] = ACTIONS[key].label;
     }
     const sections = [];
-    if (ACTIONS[step.action].point) {
+    if (step_has_point(step)) {
         const now = step_point(step, view_now());
         const hit = hit_at(now.x, now.y);
         sections.push(h('div', { class: 'section' },
@@ -495,11 +691,26 @@ function render_step_body(index) {
             class: 'btn small danger',
             on_click: function () {
                 commit(function (activity) { activity.steps.splice(index, 1); }, false);
+                steps_changed();
                 panel.open_step = -1;
                 panel_render();
             },
-        }, 'Delete step')));
+        }, 'Delete step'),
+        save_button(step.id)));
     return h('div', { class: 'step-body' }, sections);
+}
+
+/*
+ * save_button(id) -> "💾 Save" when that step ('' = the settings) has unsaved changes,
+ *   else a quiet "✓ Saved"
+ */
+function save_button(id) {
+    const dirty = panel.activity.unsaved.indexOf(id) >= 0;
+    return h('button', {
+        class: dirty ? 'btn small primary' : 'btn small ghost',
+        title: gist_ready() ? 'Save, and update the GitHub gist' : 'Save',
+        on_click: save_now,
+    }, dirty ? '💾 Save' : '✓ Saved');
 }
 
 /*
@@ -517,9 +728,10 @@ function render_step(index) {
             },
         },
         h('span', { class: 'badge' }, String(index + 1)),
-        ACTIONS[step.action].point ? mini_screen(step, true) : null,
+        step_has_point(step) ? mini_screen(step, true) : null,
         h('div', { class: 'what' },
-            h('div', { class: 'title' }, step_title(step, index)),
+            h('div', { class: 'title' }, step_title(step, index),
+                panel.activity.unsaved.indexOf(step.id) >= 0 ? h('span', { class: 'unsaved', title: 'Changed since the last Save' }, 'unsaved') : null),
             h('div', { class: 'desc' }, step_summary(step))),
         h('input', {
             type: 'checkbox', checked: step.enabled, title: 'Play this step',
@@ -587,35 +799,39 @@ function render_detail() {
         h('div', { class: 'row' },
             h('button', { class: 'btn ghost small', on_click: close_activity }, '←'),
             text_field(a.name, function (v) {
-                commit(function (act) { act.name = v.trim() || 'Untitled'; }, false);
+                edit_settings(function (act) { act.name = v.trim() || 'Untitled'; }, false);
             }, { class: 'name grow', 'aria-label': 'Activity name' })),
         h('div', { class: 'row' },
             h('button', { class: 'btn primary', on_click: function () { play_activity(a, 0); } }, '▶ Play'),
             h('button', { class: 'btn', on_click: stop_run }, '■ Stop'),
+            a.unsaved.length > 0
+                ? h('button', { class: 'btn primary', title: 'Save every change, and update the gist', on_click: save_now }, '💾 Save')
+                : h('span', { class: 'muted' }, '✓ Saved'),
             h('span', { class: 'grow' }),
             'Loops', number_field(a.loops, function (n) {
-                commit(function (act) { act.loops = clamp(Math.round(n), 0, 100000); }, true);
+                edit_settings(function (act) { act.loops = clamp(Math.round(n), 0, 100000); }, true);
             }, { min: '0', title: '0 = until stopped' }),
             'every', seconds_field(a.loop_pause_ms, function (ms) {
-                commit(function (act) { act.loop_pause_ms = ms; }, false);
+                edit_settings(function (act) { act.loop_pause_ms = ms; }, false);
             }), 's'),
         h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Runs on'), text_field(a.pages, function (v) {
-            commit(function (act) { act.pages = v.trim() || `${act.site}/*`; }, false);
+            edit_settings(function (act) { act.pages = v.trim() || `${act.site}/*`; }, false);
         }, { class: 'grow', title: 'Pages this activity is for: a * pattern or /regex/' })),
         render_device_row(a),
         h('div', { class: 'row' },
             h('label', { class: 'row' }, h('input', {
                 type: 'checkbox', checked: a.need_online,
                 on_change: function (event) {
-                    commit(function (act) { act.need_online = event.target.checked; }, true);
+                    edit_settings(function (act) { act.need_online = event.target.checked; }, true);
                 },
             }), 'Only play with internet'),
             a.need_online ? select_field(a.offline, { wait: 'if it\'s off, wait for it', stop: 'if it\'s off, stop' }, function (v) {
-                commit(function (act) { act.offline = v; }, false);
+                edit_settings(function (act) { act.offline = v; }, false);
             }) : null),
         h('div', { class: 'steps' }, steps),
         h('div', { class: 'row' },
             h('button', { class: 'btn primary', on_click: function () { add_point_step('click'); } }, '＋ Add click (mark on page)'),
+            h('button', { class: 'btn', title: 'Type into the field the click before this step focuses', on_click: add_type_step }, '⌨ Type text'),
             select_field('', {
                 '': '＋ Other step…', read: 'Read text (mark on page)', side: 'Run on another site (split view)', wait: 'Only wait', key: 'Press a key',
             }, function (v) {
@@ -625,6 +841,19 @@ function render_detail() {
                     add_other_step(v);
                 }
             })),
+        h('div', { class: 'row', style: { marginTop: '12px' } },
+            h('span', { class: 'grow' }),
+            h('button', {
+                class: 'btn small danger',
+                on_click: function () {
+                    if (!confirm(`Delete the activity "${a.name}"?${gist_ready() ? ' It is removed from the gist too (the gist\'s history still has it).' : ''}`)) {
+                        return;
+                    }
+                    remove_activity(a.id);
+                    gist_sync_soon();
+                    close_activity();
+                },
+            }, 'Delete activity')),
     ];
 }
 
@@ -637,10 +866,10 @@ function render_device_row(a) {
     return h('div', { class: 'row' },
         h('span', { class: 'muted' }, 'View as'),
         select_field(a.device, DEVICES, function (v) {
-            commit(function (act) { act.device = v; }, true);
+            edit_settings(function (act) { act.device = v; }, true);
         }),
         a.device === 'desktop' ? null : select_field(a.orientation, ORIENTATIONS, function (v) {
-            commit(function (act) { act.orientation = v; }, true);
+            edit_settings(function (act) { act.orientation = v; }, true);
         }),
         same ? null : h('button', {
             class: 'btn small', title: 'Show this tab that way now, to mark points on that layout (the page reloads)',
@@ -692,6 +921,7 @@ function render_transfer() {
                 on_click: function () {
                     try {
                         toast(`Imported ${import_activities(area.value)} activities`);
+                        gist_sync_soon();
                         panel.view = 'list';
                         panel_render();
                     } catch (e) {
@@ -703,15 +933,176 @@ function render_transfer() {
 }
 
 /*
+ * ago(ms) -> "just now", "5 min ago", "3 h ago"
+ */
+function ago(ms) {
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 45) {
+        return 'just now';
+    }
+    if (s < 3600) {
+        return `${Math.round(s / 60)} min ago`;
+    }
+    if (s < 86400) {
+        return `${Math.round(s / 3600)} h ago`;
+    }
+    return new Date(ms).toLocaleDateString();
+}
+
+/*
+ * render_cloud() — the gist button in the footer: off, synced when, or failing
+ */
+function render_cloud() {
+    if (panel.cloud === null) {
+        return;
+    }
+    const conf = gist_conf();
+    let text = '☁ Gist';
+    let cls = 'btn small';
+    if (gist_ready()) {
+        if (conf.error !== '') {
+            text = '☁ Sync failed';
+            cls += ' danger';
+        } else {
+            text = conf.last_sync > 0 ? `☁ Synced ${ago(conf.last_sync)}` : '☁ Syncing…';
+        }
+    }
+    panel.cloud.className = cls;
+    panel.cloud.textContent = text;
+    panel.cloud.title = conf.error !== '' ? conf.error : 'Back up and sync your activities in a GitHub gist';
+}
+
+/*
+ * download(name, text) — save text as a file
+ */
+function download(name, text) {
+    const link = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/json' })), download: name });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(function () {
+        URL.revokeObjectURL(link.href);
+    }, 10000);
+}
+
+/*
+ * render_sync() -> the gist settings: connect, status, sync now, history, backup
+ */
+function render_sync() {
+    const conf = gist_conf();
+    const back = h('button', { class: 'btn ghost small', on_click: function () { panel.view = panel.activity === null ? 'list' : 'detail'; panel_render(); } }, '←');
+    const status = h('div', { class: conf.error !== '' ? 'note bad' : 'note' });
+    if (!gist_ready()) {
+        status.textContent = 'Not connected.';
+    } else if (conf.error !== '') {
+        status.textContent = `Last sync failed: ${conf.error}`;
+    } else {
+        status.textContent = conf.last_sync > 0 ? `Synced ${ago(conf.last_sync)}.` : 'Not synced yet.';
+    }
+    const backup = h('button', {
+        class: 'btn small',
+        on_click: function () {
+            download(`followme-backup-${new Date().toISOString().slice(0, 10)}.json`, backup_text());
+        },
+    }, '⬇ Download a backup file');
+    if (!gist_ready()) {
+        const token = h('input', { type: 'password', placeholder: 'GitHub token (ghp_… or github_pat_…)', class: 'grow', autocomplete: 'off' });
+        const id = h('input', { type: 'text', placeholder: 'Gist id or URL (empty = find or make one)', class: 'grow', spellcheck: 'false' });
+        const connect = h('button', {
+            class: 'btn primary',
+            on_click: function () {
+                if (token.value.trim() === '') {
+                    toast('Paste a token first.', { type: 'error' });
+                    return;
+                }
+                connect.disabled = true;
+                connect.textContent = 'Connecting…';
+                gist_connect(token.value.trim(), id.value).then(function (c) {
+                    toast('Connected — your activities are in the gist');
+                    panel_render();
+                    return c;
+                }, function (e) {
+                    connect.disabled = false;
+                    connect.textContent = 'Connect';
+                    toast(e.message, { type: 'error' });
+                });
+            },
+        }, 'Connect');
+        return [
+            h('div', { class: 'row' }, back, h('b', null, '☁ GitHub gist')),
+            h('div', { class: 'muted' }, 'Keeps every activity of every site in one private gist: one readable file per activity. ',
+                'It is updated when you press Save, add a step, or delete or import an activity, and read when followMe starts. ',
+                'The gist keeps every earlier version (Revisions), so it is also your backup history.'),
+            h('ol', { class: 'muted howto' },
+                h('li', null, 'On GitHub: Settings → Developer settings → Personal access tokens → ',
+                    h('a', { href: 'https://github.com/settings/tokens/new?scopes=gist&description=followMe', target: '_blank', rel: 'noopener' }, 'new token (classic)'),
+                    ' with only the ', h('b', null, 'gist'), ' scope.'),
+                h('li', null, 'Paste it here. Leave the gist empty: followMe finds your followMe gist, or makes a new private one.'),
+                h('li', null, 'On another computer, paste the same token to get the same activities.')),
+            h('div', { class: 'row' }, token),
+            h('div', { class: 'row' }, id),
+            h('div', { class: 'row' }, connect),
+            h('div', { class: 'muted' }, 'The token is kept in Moss\'s storage for this script on this computer.'),
+            h('div', { class: 'row' }, backup),
+        ];
+    }
+    return [
+        h('div', { class: 'row' }, back, h('b', null, '☁ GitHub gist')),
+        status,
+        h('div', { class: 'row' },
+            h('button', {
+                class: 'btn primary',
+                on_click: function () {
+                    status.textContent = 'Syncing…';
+                    gist_sync().then(function (r) {
+                        toast(`Synced: ${r.pulled} taken from the gist, ${r.pushed} written to it`);
+                        panel_render();
+                    }, function (e) {
+                        toast(e.message, { type: 'error' });
+                        panel_render();
+                    });
+                },
+            }, '⟳ Sync now'),
+            conf.url ? h('a', { class: 'btn', href: conf.url, target: '_blank', rel: 'noopener' }, 'Open the gist') : null,
+            conf.url ? h('a', { class: 'btn', href: `${conf.url}/revisions`, target: '_blank', rel: 'noopener', title: 'Every earlier version: your backups' }, 'History') : null),
+        h('label', { class: 'row' }, h('input', {
+            type: 'checkbox', checked: conf.auto,
+            on_change: function (event) {
+                gist_conf_set({ auto: event.target.checked });
+            },
+        }), 'Sync automatically (Save, add a step, start-up)'),
+        h('div', { class: 'muted' }, `Gist ${conf.gist_id}`),
+        h('div', { class: 'row' }, backup,
+            h('button', {
+                class: 'btn small danger',
+                on_click: function () {
+                    if (confirm('Stop syncing with this gist? The gist stays on GitHub; the activities stay here.')) {
+                        gist_disconnect();
+                        panel_render();
+                    }
+                },
+            }, 'Disconnect')),
+    ];
+}
+
+/*
  * panel_render() — draw the panel for the current view
  */
 function panel_render() {
-    if (!panel.prefs.open) {
+    if (!panel_visible()) {
         return;
     }
     if (panel.layer === null) {
         panel.layer = layer_create('panel', PANEL_CSS);
+        if (panel.side !== null) {
+            panel.side.set_root(panel.layer.root);
+        }
     }
+    // In the side panel the copy is what shows; the page keeps it out of sight.
+    panel.layer.host.style.display = panel.side_shown || panel.hidden ? 'none' : '';
+    // Redrawing replaces the body: keep where it was scrolled to (same view only).
+    const old_body = panel.layer.root.querySelector('.body');
+    const keep_scroll = old_body !== null && old_body.dataset.view === panel.view ? old_body.scrollTop : 0;
     if (panel.view === 'detail' && panel.activity !== null) {
         panel.activity = load_activity(panel.activity.id);
         if (panel.activity === null) {
@@ -723,6 +1114,8 @@ function panel_render() {
         body = render_detail();
     } else if (panel.view === 'transfer') {
         body = render_transfer();
+    } else if (panel.view === 'sync') {
+        body = render_sync();
     } else {
         body = render_list();
     }
@@ -734,24 +1127,30 @@ function panel_render() {
             check_online(true).then(render_net);
         },
     });
+    panel.cloud = h('button', { class: 'btn small', on_click: function () { panel.view = 'sync'; panel_render(); } });
     panel.status = h('div', { class: 'status', hidden: true }, h('span', { class: 'text' }), h('button', { class: 'btn small', on_click: stop_run }, '■ Stop'));
     const side = panel.prefs.side;
-    const root = h('div', { class: `fm panel ${side}` },
+    const root = h('div', { class: `fm panel ${side}${panel.side_shown ? ' in-side' : ''}` },
         h('div', { class: 'head' },
             h('span', { class: 'logo' }, 'follow', h('b', null, 'Me')),
             h('span', { class: 'site grow' }, location.hostname),
             panel.net,
-            h('button', {
-                class: 'btn ghost small', title: 'Move to the other side',
-                on_click: function () {
-                    panel.prefs.side = side === 'right' ? 'left' : 'right';
-                    save_prefs(panel.prefs);
-                    panel_render();
-                    tab_render();
-                },
-            }, '⇆'),
-            h('button', { class: 'btn ghost small', title: 'Close (Alt+Shift+P)', on_click: panel_close }, '✕')),
-        h('div', { class: 'body' }, body),
+            panel.side_shown
+                ? h('button', { class: 'btn small', title: 'Put the panel back on the page', on_click: unpin }, 'Unpin')
+                : [
+                    h('button', { class: 'btn ghost small', title: 'Pin to Chrome\'s side panel: next to the page instead of over it, full size in phone view', on_click: pin }, '📌'),
+                    h('button', {
+                        class: 'btn ghost small', title: 'Move to the other side',
+                        on_click: function () {
+                            panel.prefs.side = side === 'right' ? 'left' : 'right';
+                            save_prefs(panel.prefs);
+                            panel_render();
+                            tab_render();
+                        },
+                    }, '⇆'),
+                    h('button', { class: 'btn ghost small', title: 'Close (Alt+Shift+P)', on_click: panel_close }, '✕'),
+                ]),
+        h('div', { class: 'body', 'data-view': panel.view }, body),
         panel.status,
         h('div', { class: 'foot' },
             h('label', { class: 'row' }, h('input', {
@@ -763,9 +1162,12 @@ function panel_render() {
                 },
             }), 'Show marks'),
             h('span', { class: 'grow' }),
+            panel.cloud,
             h('button', { class: 'btn small', on_click: function () { panel.view = 'transfer'; panel_render(); } }, 'Export / import')));
     panel.layer.root.replaceChildren(h('style', null, BASE_CSS + PANEL_CSS), root);
+    root.querySelector('.body').scrollTop = keep_scroll;
     render_net();
+    render_cloud();
     show_marks();
     if (current_run !== null) {
         render_status(current_run);
@@ -790,7 +1192,7 @@ function render_status(run) {
         panel.rows[i].classList.toggle('current', same && playing && i === run.step);
     }
     if (playing) {
-        if (!same || !panel.prefs.open) {
+        if (!same || !panel_visible()) {
             marks_set(run.activity, -1, null);
         }
         marks_active(run.step);
@@ -809,7 +1211,7 @@ let tab_layer = null;
  * tab_render() — the small tab on the window's edge that opens the panel
  */
 function tab_render() {
-    if (panel.prefs.open) {
+    if (panel_visible()) {
         if (tab_layer !== null) {
             layer_remove(tab_layer);
             tab_layer = null;

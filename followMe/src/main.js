@@ -28,14 +28,16 @@ async function main() {
     panel.prefs = load_prefs();
     on_run_change(render_status);
     on_online_change(render_net);
+    on_gist_change(render_cloud);
     watch_network();
+    watch_focus();
     check_online(true);
     await device_now();
     document.addEventListener('keydown', on_key, true);
     GM_registerMenuCommand('followMe: open / close the panel', panel_toggle);
     GM_registerMenuCommand('followMe: stop playing', stop_run);
     GM_addValueChangeListener(ACTIVITIES_KEY, function (key, old_value, new_value, remote) {
-        if (remote && panel.prefs.open) {
+        if (remote && panel_visible()) {
             panel_render(); // changed in another tab
         }
     });
@@ -44,10 +46,18 @@ async function main() {
         panel.activity = last;
         panel.view = 'detail';
     }
+    if (panel.prefs.pinned) {
+        side_start();
+    }
     tab_render();
     if (panel.prefs.open) {
         panel_render();
     }
+    gist_sync_on_start().then(function (r) {
+        if (r !== null && r.pulled > 0 && panel_visible()) {
+            panel_render(); // the gist had newer activities
+        }
+    });
     let ran = await resume_saved_run();
     if (ran === null) {
         ran = await start_job();
