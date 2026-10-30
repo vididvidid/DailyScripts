@@ -51,6 +51,7 @@ a.btn { text-decoration: none; color: inherit; display: inline-block; }
 /* In Chrome's side panel: fill it (and never become the phone-width bottom sheet). */
 .panel.in-side, .panel.in-side.left, .panel.in-side.right { position: fixed !important; inset: 0 !important; width: auto !important;
   height: auto !important; max-width: none !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
+input.secret { -webkit-text-security: disc; }
 .net { border: 0; background: transparent; font-size: 11px; color: var(--muted); padding: 2px 4px; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .net::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .net.on::before { background: var(--ok); } .net.off { color: var(--bad); } .net.off::before { background: var(--bad); }

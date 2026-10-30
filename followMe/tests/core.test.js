@@ -42,8 +42,8 @@ function page_create(url, shared_values) {
         GM_xmlhttpRequest: function (d) {
             if (ctx.fake_github !== undefined && d.url.startsWith('https://api.github.com')) {
                 setTimeout(function () {
-                    const answer = ctx.fake_github(d.method, d.url, d.data === undefined ? null : JSON.parse(d.data));
-                    d.onload({ status: answer[0], responseText: JSON.stringify(answer[1]) });
+                    const answer = ctx.fake_github(d.method, d.url, d.data === undefined ? null : JSON.parse(d.data), d.headers);
+                    d.onload({ status: answer[0], responseText: JSON.stringify(answer[1]), responseHeaders: answer[2] || '' });
                 }, 5);
                 return;
             }
@@ -394,8 +394,15 @@ test('other site: a step plays an activity beside this page and brings back what
  *   with one gist, kept in memory
  */
 function fake_gist() {
-    const g = { id: 'abc123def456abc123de', files: {}, patches: 0 };
-    g.handle = function (method, url, body) {
+    const g = { id: 'abc123def456abc123de', files: {}, patches: 0, token: `ghp_${'a'.repeat(36)}`, scopes: 'gist', auth: [] };
+    g.handle = function (method, url, body, headers) {
+        g.auth.push(headers.Authorization);
+        if (headers.Authorization !== `Bearer ${g.token}`) {
+            return [401, { message: 'Bad credentials' }];
+        }
+        if (method === 'GET' && url.endsWith('/user')) {
+            return [200, { login: 'me' }, `x-oauth-scopes: ${g.scopes}\r\n`];
+        }
         if (method === 'GET' && url.endsWith('/gists?per_page=100')) {
             return [200, []];
         }
@@ -434,7 +441,9 @@ test('gist: two computers share activities through one gist, deletions included'
     const a = one.fm.activity_create('Checkout flow', 'https://shop.test/cart');
     a.steps.push(quick_step(one, 'pay'));
     one.fm.save_activity(a);
-    await one.fm.gist_connect('tok', '');
+    // Pasted with a line break and a space, as copying sometimes does: still the token.
+    await one.fm.gist_connect(` ${gist.token.slice(0, 20)}\n${gist.token.slice(20)} `, '');
+    assert.equal(gist.auth[0], `Bearer ${gist.token}`);
     const names = Object.keys(gist.files).sort();
     assert.equal(names.length, 2);
     assert.equal(names[0], '_followme.json');
@@ -444,7 +453,7 @@ test('gist: two computers share activities through one gist, deletions included'
     // Another computer: same token, finds the same gist by id, gets the activity.
     const two = page_create('https://shop.test/');
     two.fake_github = gist.handle;
-    await two.fm.gist_connect('tok', `https://gist.github.com/someone/${gist.id}`);
+    await two.fm.gist_connect(gist.token, `https://gist.github.com/someone/${gist.id}`);
     assert.equal(Object.keys(two.fm.load_all()).length, 1);
     assert.equal(two.fm.load_all()[a.id].name, 'Checkout flow');
 
@@ -473,6 +482,20 @@ test('gist: two computers share activities through one gist, deletions included'
     const patches = gist.patches;
     await two.fm.gist_sync();
     assert.equal(gist.patches, patches, 'nothing changed, nothing written');
+});
+
+test('gist: a wrong, cut-off or under-scoped token gets a clear message', async function () {
+    const gist = fake_gist();
+    const page = page_create('https://shop.test/');
+    page.fake_github = gist.handle;
+    await assert.rejects(page.fm.gist_connect('ghp_short', ''), /looks cut off or changed: "ghp_sh…" \(9 characters\)/);
+    await assert.rejects(page.fm.gist_connect('hello', ''), /doesn't look like a GitHub token/);
+    await assert.rejects(page.fm.gist_connect(`ghp_${'b'.repeat(36)}`, ''), /GitHub says "Bad credentials" for the token "ghp_bb…" \(40 characters\)/);
+    gist.scopes = 'repo, read:user';
+    await assert.rejects(page.fm.gist_connect(gist.token, ''), /works \(it is me's\), but it lacks the "gist" scope \(it has: repo, read:user\)/);
+    gist.scopes = 'gist, repo';
+    await page.fm.gist_connect(`Bearer ${gist.token}`, '');
+    assert.equal(Object.keys(gist.files).length, 1, 'connected and made the gist');
 });
 
 test('build: followMe.moss is the header plus every source file, and up to date', function () {

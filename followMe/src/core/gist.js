@@ -81,8 +81,44 @@ function mark_deleted(id) {
 }
 
 /*
+ * clean_token(text) -> the token alone: no spaces, line breaks or invisible characters
+ *   picked up when copying, no "Bearer " / "token " / quotes around it
+ */
+function clean_token(text) {
+    return String(text).replace(/^\s*(bearer|token)\s+/i, '').replace(/[^\x21-\x7e]/g, '').replace(/^["'`]+|["'`]+$/g, '');
+}
+
+/*
+ * token_shape(token) -> "ghp_ab… (40 characters)": enough to see it is the right one,
+ *   not enough to use it
+ */
+function token_shape(token) {
+    return `"${token.slice(0, 6)}…" (${token.length} characters)`;
+}
+
+/*
+ * token_problem(token) -> why this can't be a GitHub token, or ''
+ */
+function token_problem(token) {
+    if (token === '') {
+        return 'Paste a token first.';
+    }
+    if (/^ghp_[A-Za-z0-9]{36}$/.test(token) || /^github_pat_[A-Za-z0-9_]{60,}$/.test(token) || /^gh[ous]_[A-Za-z0-9]{36,}$/.test(token)) {
+        return '';
+    }
+    if (/^(ghp_|github_pat_)/.test(token)) {
+        return `That token looks cut off or changed: ${token_shape(token)}. A classic token is "ghp_" + 36 characters; a fine-grained one "github_pat_" + about 80. Copy it again, whole.`;
+    }
+    if (/^[0-9a-f]{40}$/.test(token)) {
+        return ''; // an old-style classic token
+    }
+    return `That doesn't look like a GitHub token: ${token_shape(token)}. Tokens start with "ghp_" (classic) or "github_pat_" (fine-grained).`;
+}
+
+/*
  * github(token, method, url, body) -> Promise of the parsed JSON answer; throws with
- *   GitHub's message on an error
+ *   GitHub's message on an error. err.status is the HTTP status; the answer's headers
+ *   are on github.last_headers.
  */
 function github(token, method, url, body) {
     return new Promise(function (resolve, reject) {
@@ -105,17 +141,23 @@ function github(token, method, url, body) {
                 } catch (e) {
                     data = response.responseText;
                 }
+                github.last_headers = response.responseHeaders || '';
                 if (response.status >= 200 && response.status < 300) {
                     resolve(data);
                     return;
                 }
-                let why = data !== null && data.message ? data.message : `HTTP ${response.status}`;
+                const said = data !== null && data.message ? data.message : `HTTP ${response.status}`;
+                let why = `GitHub says "${said}"`;
                 if (response.status === 401) {
-                    why = 'the token is wrong or expired';
+                    why = `GitHub says "${said}" for the token ${token_shape(token)}: it is not a valid token now. Check it was copied whole, and that it isn't expired or deleted (github.com/settings/tokens).`;
                 } else if (response.status === 404) {
-                    why = 'gist not found (or the token lacks the "gist" scope)';
+                    why = `GitHub says "${said}": the gist doesn't exist, or the token may not use gists (classic: tick "gist"; fine-grained: Account permissions → Gists → Read and write).`;
+                } else if (response.status === 403) {
+                    why = `GitHub says "${said}" (403): the token may not use gists (fine-grained: Account permissions → Gists → Read and write), or the rate limit was hit.`;
                 }
-                reject(new Error(`GitHub: ${why}`));
+                const err = new Error(why);
+                err.status = response.status;
+                reject(err);
             },
             onerror: function () {
                 reject(new Error('GitHub could not be reached'));
@@ -364,7 +406,18 @@ function gist_sync_on_start() {
  * gist_connect(token, gist_id) -> Promise<struct gist_conf>: use that gist, or find the
  *   followMe gist of that account, or make a new private one; then sync
  */
-async function gist_connect(token, gist_id) {
+async function gist_connect(token_text, gist_id) {
+    const token = clean_token(token_text);
+    const problem = token_problem(token);
+    if (problem !== '') {
+        throw new Error(problem);
+    }
+    // Ask who the token belongs to first: a clear answer before touching any gist.
+    const me = await github(token, 'GET', '/user');
+    const scopes = /x-oauth-scopes:\s*([^\r\n]*)/i.exec(github.last_headers || '');
+    if (scopes !== null && scopes[1].split(/\s*,\s*/).indexOf('gist') < 0) {
+        throw new Error(`The token works (it is ${me.login}'s), but it lacks the "gist" scope (it has: ${scopes[1] || 'none'}). Make one with "gist" ticked.`);
+    }
     let id = gist_id.trim();
     const match = /([0-9a-f]{20,})\/?$/i.exec(id);
     if (match !== null) {
