@@ -12,6 +12,8 @@ export const ORDER = [
     'src/core/util.js',
     'src/core/steps.js',
     'src/core/store.js',
+    'src/core/net.js',
+    'src/core/device.js',
     'src/core/checks.js',
     'src/core/clicker.js',
     'src/core/runner.js',
@@ -43,7 +45,7 @@ function body_of(path) {
  * bundle() -> the text of followMe.moss
  */
 export function bundle() {
-    const parts = [read('src/header.moss').trim(), '', '// Built by tools/build.mjs from src/ — edit those files, not this one.'];
+    const parts = [read('src/header.txt').trim(), '', '// Built by tools/build.mjs from src/ — edit those files, not this one.'];
     for (const path of ORDER) {
         parts.push('', `// ---------- ${path} ----------`, '', body_of(path));
     }

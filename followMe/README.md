@@ -6,12 +6,18 @@ like Android's auto-tapper apps, for the browser.
 No Puppeteer, no selectors, no ids. You **mark a point on the page**; followMe clicks
 whatever is drawn at that pixel. Chain marks into an **activity** with a break between
 clicks, and attach checks to them — *wait until the page has fully loaded*, *wait until
-the URL changed* — which is what single-page apps need, because they change the page
-without reloading it.
+the URL changed*, *wait until the internet is on* — which is what single-page apps
+need, because they change the page without reloading it.
+
+An activity can play the site as a **desktop, mobile or tablet** (real device emulation,
+so the site serves its phone layout). A step can also **hand off to another site**: open
+it beside the page in Chrome's split view, play an activity there, bring back what it
+read, close it, and carry on.
 
 ## Install
 
-1. Install [Moss](https://github.com/vididvidid/Moss) and turn on **Allow User Scripts**.
+1. Install [Moss](https://github.com/vididvidid/Moss) 0.2 or later and turn on **Allow User Scripts**.
+   (Older Moss runs followMe without the mobile/tablet view or the other-site step.)
 2. Moss dashboard → **Import…** → paste
    `https://github.com/vididvidid/DailyScripts/blob/main/followMe/followMe.moss` → **Import**, then enable it.
    (Importing the whole DailyScripts repo lists it too.)
@@ -30,9 +36,9 @@ the window. Click it, or press **Alt+Shift+P**, to open the side panel.
 | section | what you set |
 |---|---|
 | **Where on the screen** | the pixel (x, y), a small map of the window with the point on it, **📍 Mark again**, what is at that pixel right now (`button "Checkout"`), and how the point follows the page: **same spot on the screen**, **on the page** (follows scrolling; it scrolls there first), or **relative to the window size** |
-| **What it does** | left / double / right click, long press, type text (optionally clearing the field first), press a key, scroll, or only wait; repeat it *n* times with a gap |
+| **What it does** | left / double / right click, long press, type text (optionally clearing the field first), press a key, scroll, **read text**, **run on another site**, or only wait; repeat it *n* times with a gap |
 | **How** | a plain description of the events it sends |
-| **Before it, wait until** / **After it, wait until** | **Page fully loaded**, **URL changed**, **URL matches** `*glob*` or `/regex/`, **Wait a fixed time**. Each has a time limit and either *stop* or *go on* when that runs out |
+| **Before it, wait until** / **After it, wait until** | **Page fully loaded**, **URL changed**, **URL matches** `*glob*` or `/regex/`, **Internet is on**, **Wait a fixed time**. Each has a time limit and either *stop* or *go on* when that runs out |
 | **Then pause** | the break before the next step, plus an optional random ± so the timing isn't robotic |
 
 4. **▶ Play** runs it, **■ Stop** or **Esc** stops it. **Loops** repeats the whole activity
@@ -51,6 +57,65 @@ changed · 12 s". The step that is playing is outlined, and its mark pulses.
   "before" check, from the one before the previous action. Single-page apps change the
   address without reloading, so followMe watches it.
 - **URL matches:** a `*` glob or a `/regex/` against the full address.
+
+- **Internet is on:** see below.
+
+### Internet on or off
+
+The panel's header shows **● Online** or **● Offline**; click it to check again. The
+browser's own "online" flag only says the computer is on a network, and Wi-Fi without
+internet still counts as online. So followMe also asks a tiny page on the internet
+(`https://www.gstatic.com/generate_204`) through Moss.
+
+Each activity has **Only play with internet** (on by default). It is checked before
+every step. When the internet is off, the run either **waits for it to come back** (the
+status bar says so, and it carries on by itself) or **stops**. Turn it off for a site
+on your own network. The **Internet is on** check does the same for a single step,
+with its own time limit.
+
+### Desktop, mobile or tablet
+
+**View as** on an activity picks 🖥 Desktop, 📱 Mobile (412×915) or 📲 Tablet (800×1280),
+in portrait or landscape. Moss uses Chrome's own device mode (the one in DevTools) on
+that tab: the screen size, the pixel ratio, touch input, and an Android user agent the
+server sees too. The site therefore serves and draws its real phone or tablet layout,
+not a squeezed desktop page.
+
+- **Show it now** switches the tab while you edit, so you mark points on that layout.
+  The page reloads.
+- **▶ Play** switches the tab first if needed (it reloads, then the run starts).
+- On a phone or tablet view, a click is a **tap**: touch pointer events,
+  `touchstart` / `touchend`, then the mouse events and click a phone sends.
+- Chrome shows a bar saying Moss "started debugging this browser" while a tab is
+  emulated. Clicking **Cancel** on it ends the emulation, and a run that needs it stops
+  with a message. To go back, pick **Desktop** and **Show it now**.
+- At phone width the panel turns into a sheet at the bottom of the page.
+
+### Reading values, and other sites in split view
+
+**Read text** is a point step. It takes the text at that pixel (a field's value, or the
+words shown) and keeps it as `{answer}`, or any name you give it. An optional
+`/regex/` keeps only part of the text: `/([\d,]+)/` turns "Rs 1,499 only" into `1,499`.
+Later steps use it by name. For example, a **Type text** of `{price} minus 10%`. Values
+last for the whole run, across page loads.
+
+**Run on another site** goes to a different website mid-activity. For example, steps 1
+and 2 happen here, then you need an answer from another site, then the activity
+carries on here.
+
+1. First, on the other site, make the activity that gets the answer. End it with a
+   **Read text** step for each value you need.
+2. Here, add **＋ Other step… → Run on another site (split view)**. Pick that activity,
+   and optionally the page to open. `{name}` works in the address, for example
+   `https://example.com/search?q={item}`.
+3. When it plays, Moss opens that page **beside this one**, in Chrome's split view
+   (Chrome 155+). On older Chrome, this window narrows and the page opens in a second
+   window next to it. followMe on that page plays the activity with the values read so
+   far. It then hands back every value it read, the page closes, the window gets its
+   size back, and the activity carries on here with those values.
+
+You can choose split view only, a window only, which side, a time limit, and whether to
+close the other page when it is done.
 
 ### Clicks that load a new page
 
@@ -88,13 +153,16 @@ Unlike the other DailyScripts, followMe is split into small files and built into
 one installable file. Everything below lives in this folder; run the commands from here.
 
 ```
-src/header.moss        the Moss header
+src/header.txt         the Moss header (a .txt, so Moss doesn't list it as a script)
 src/core/util.js       helpers (sleep that a stop wakes, globs, ids)
 src/core/steps.js      activities, steps, checks, and their plain-language descriptions
-src/core/store.js      GM storage, per-tab run state for resuming
-src/core/checks.js     page loaded / URL changed / URL matches / wait
-src/core/clicker.js    pixel → element, pointer/mouse/key events, typing, scrolling
-src/core/runner.js     playing, loops, pauses, stop, resume after a page load
+src/core/store.js      GM storage, per-tab run state for resuming, other-site job results
+src/core/net.js        is the internet on (navigator.onLine + a probe through GM_xmlhttpRequest)
+src/core/device.js     desktop / mobile / tablet view through Moss's GM_device
+src/core/checks.js     page loaded / URL changed / URL matches / internet on / wait
+src/core/clicker.js    pixel → element, pointer/mouse/touch/key events, typing, scrolling, reading text
+src/core/runner.js     playing, loops, pauses, stop, resume after a page load, device switch,
+                       internet gate, other-site steps (GM_split)
 src/ui/                styles, DOM helpers, the pixel picker, the marks, the panel
 src/main.js            start-up: edge tab, Alt+Shift+P, Esc, menu commands, resume
 tools/build.mjs        joins them, in order, into followMe.moss
@@ -105,7 +173,7 @@ later files call earlier ones. Edit `src/`, then:
 
 ```sh
 npm run build   # write followMe.moss
-npm test        # core behaviour (runner, checks, resume, storage) + the style checker
+npm test        # core behaviour (runner, checks, resume, storage, values, internet, device, other site) + the style checker
 npm run check   # followMe.moss is up to date, every file parses
 ```
 

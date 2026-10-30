@@ -9,6 +9,7 @@
  *   url_changed  the address differs from the one before the action (single-page
  *                apps change it without reloading, so it is watched, not awaited)
  *   url_matches  the address matches a "*" glob or /regex/
+ *   online       the internet is on (see net.js)
  *   wait         a fixed time
  *
  * Every wait returns 'ok', 'timeout' or 'stopped'.
@@ -100,6 +101,8 @@ async function run_check(run, check, url_before, on_wait) {
         return wait_until(run, timeout, function () {
             return glob_test(check.value, location.href);
         }, on_wait);
+    case 'online':
+        return wait_online(run, timeout, on_wait);
     case 'wait':
         return (await sleep(run, to_number(check.value, 0), on_wait)) ? 'ok' : 'stopped';
     default:
@@ -118,6 +121,8 @@ function check_now(check, url_before) {
         return location.href !== url_before;
     case 'url_matches':
         return glob_test(check.value, location.href);
+    case 'online':
+        return net.online === true;
     default:
         return true;
     }
