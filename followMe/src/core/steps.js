@@ -13,6 +13,8 @@
  *     orientation: 'portrait' | 'landscape';     for mobile and tablet
  *     need_online: boolean;    only play while the internet is on
  *     offline: 'wait' | 'stop';   what to do when it is off
+ *     unsaved: string[];       ids of steps changed since the last Save ('' = the activity's
+ *                              own settings); kept here only, not in the gist
  *     steps: struct step[];
  *     created_at, updated_at: number;
  * }
@@ -27,6 +29,11 @@
  *     view_w, view_h: number;       window size when it was marked ('scaled')
  *     text: string;            'type': what to type; {name} puts in a value read earlier
  *     clear_first: boolean;    'type': empty the field first
+ *     type_into: 'point' | 'focused';   'type': click the field at x, y first, or type into
+ *                              the field that has the focus (a click step before put it there)
+ *     type_mode: 'keys' | 'paste';   'type': one key at a time, or all at once
+ *     key_delay_ms: number;    'type' key by key: pause between two keys
+ *     enter_after: boolean;    'type': press Enter when done (submits a search box)
  *     key: string;             'key': "Enter", "Escape", "Tab", "a", …
  *     scroll_dx, scroll_dy: number;   'scroll': how far
  *     hold_ms: number;         'long_press': how long the button stays down
@@ -87,13 +94,17 @@ const PLACES = {
     scaled: 'Same spot relative to the window size',
 };
 
+const TYPE_INTO = { focused: 'the field that has the focus (click it in the step before)', point: 'the field at a point (clicks it first)' };
+const TYPE_MODES = { keys: 'key by key', paste: 'all at once' };
+
 const SIDE_HOWS = { auto: 'split view (or a window)', split: 'split view only', window: 'a window beside this one' };
 
 const DEFAULT_TIMEOUT = 30000;
 
 // Fields added after 0.1.0, filled in on activities and steps stored before.
-const ACTIVITY_DEFAULTS = { start_url: '', device: 'desktop', orientation: 'portrait', need_online: true, offline: 'wait' };
+const ACTIVITY_DEFAULTS = { start_url: '', device: 'desktop', orientation: 'portrait', need_online: true, offline: 'wait', unsaved: [] };
 const STEP_DEFAULTS = {
+    type_into: 'point', type_mode: 'paste', key_delay_ms: 60, enter_after: false,
     var_name: 'answer', read_pattern: '', side_activity: '', side_url: '', side_how: 'auto', side_place: 'right',
     side_timeout_ms: 120000, side_close: true,
 };
@@ -138,6 +149,10 @@ function step_create(x, y, view) {
         view_h: Math.round(view.h),
         text: '',
         clear_first: true,
+        type_into: 'point',
+        type_mode: 'keys',
+        key_delay_ms: 60,
+        enter_after: false,
         key: 'Enter',
         scroll_dx: 0,
         scroll_dy: 400,
@@ -158,6 +173,16 @@ function step_create(x, y, view) {
         jitter_ms: 0,
         enabled: true,
     };
+}
+
+/*
+ * step_has_point(step) -> true if the step acts at its x, y (and gets a mark on the page)
+ */
+function step_has_point(step) {
+    if (step.action === 'type') {
+        return step.type_into !== 'focused';
+    }
+    return ACTIONS[step.action].point;
 }
 
 /*
@@ -260,7 +285,7 @@ function describe_action(step) {
     case 'long_press':
         return `press and hold ${format_ms(step.hold_ms)} ${at}`;
     case 'type':
-        return `type "${step.text}" into the field ${at}`;
+        return `type "${step.text}"${step.type_into === 'focused' ? ' into the focused field' : ` into the field ${at}`}${step.enter_after ? ', then Enter' : ''}`;
     case 'key':
         return `press ${step.key}`;
     case 'read':
@@ -286,7 +311,7 @@ function describe_how(step) {
     case 'long_press':
         return 'Presses the left button on whatever is at that pixel, keeps it down for the hold time, then releases it.';
     case 'type':
-        return `Clicks the field at that pixel to focus it${step.clear_first ? ', empties it' : ''}, then types the text and tells the page the value changed (input and change events).`;
+        return `${step.type_into === 'focused' ? 'Takes the field that has the focus (the one the step before clicked)' : 'Clicks the field at that pixel to focus it'}${step.clear_first ? ', empties it' : ''}, then types the text ${step.type_mode === 'keys' ? 'one key at a time (key down, input, key up for each character), so search boxes show their suggestions' : 'all at once'} and tells the page the value changed.${step.enter_after ? ' Then it presses Enter; if the page doesn\'t handle that itself, the field\'s form is submitted.' : ''}`;
     case 'key':
         return 'Sends key down, key press and key up to whatever has the focus. Enter in a form field also submits the form.';
     case 'scroll':

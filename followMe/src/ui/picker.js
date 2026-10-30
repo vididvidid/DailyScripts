@@ -28,6 +28,9 @@ function pick_point(number) {
          */
         function finish(point) {
             picking = null;
+            if (frame !== 0) {
+                cancelAnimationFrame(frame);
+            }
             document.removeEventListener('keydown', on_key, true);
             layer_remove(layer);
             resolve(point);
@@ -44,9 +47,16 @@ function pick_point(number) {
             }
         }
 
-        overlay.addEventListener('pointermove', function (event) {
-            const x = event.clientX;
-            const y = event.clientY;
+        let frame = 0;
+        let last = null;
+
+        /*
+         * follow() — move the crosshair to the last pointer position, once per frame
+         */
+        function follow() {
+            frame = 0;
+            const x = last.clientX;
+            const y = last.clientY;
             hline.style.top = `${y}px`;
             vline.style.left = `${x}px`;
             const hit = hit_at(x, y);   // the picker layer itself is skipped
@@ -55,6 +65,13 @@ function pick_point(number) {
             info.style.left = right ? '' : `${x + 14}px`;
             info.style.right = right ? `${window.innerWidth - x + 14}px` : '';
             info.style.top = `${Math.min(y + 14, window.innerHeight - 50)}px`;
+        }
+
+        overlay.addEventListener('pointermove', function (event) {
+            last = event;
+            if (frame === 0) {
+                frame = requestAnimationFrame(follow);
+            }
         });
         overlay.addEventListener('click', function (event) {
             event.preventDefault();

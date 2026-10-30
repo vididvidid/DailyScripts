@@ -11,10 +11,11 @@
  *     active: number;                     step being played, or -1
  *     on_move(index, x, y);               a mark was dragged to (x, y)
  *     frame: number;                      pending animation frame, or 0
+ *     drawn: string;                      what is on screen, to skip redrawing the same
  * }
  */
 
-const marks = { layer: null, activity: null, selected: -1, active: -1, on_move: null, frame: 0 };
+const marks = { layer: null, activity: null, selected: -1, active: -1, on_move: null, frame: 0, drawn: '' };
 
 /*
  * marks_set(activity, selected, on_move) — show these marks (activity null hides them)
@@ -91,17 +92,23 @@ function marks_render() {
         }
         return;
     }
+    const view = view_now();
+    // The same marks in the same place: leave them (no flicker, the pulse keeps going).
+    const key = JSON.stringify([marks.activity.steps, marks.selected, marks.active, view]);
+    if (marks.layer !== null && key === marks.drawn) {
+        return;
+    }
+    marks.drawn = key;
     if (marks.layer === null) {
         marks.layer = layer_create('marks', MARKS_CSS);
     }
-    const view = view_now();
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     const dots = [];
     let prev = null;
     const steps = marks.activity.steps;
     for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
-        if (!ACTIONS[step.action].point) {
+        if (!step_has_point(step)) {
             continue;
         }
         const p = step_point(step, view);

@@ -46,11 +46,12 @@ function view_now() {
  */
 function hit_at(x, y) {
     // Hide followMe's layers for the lookup (marks sit right on the target pixels).
-    // It all happens before the next paint, so nothing flickers.
+    // visibility, not display: hit testing skips hidden boxes, but they keep their
+    // layout and scroll position, and it is put back before the next paint.
     const saved = [];
     for (const layer of own_layers) {
-        saved.push(layer.style.display);
-        layer.style.display = 'none';
+        saved.push(layer.style.visibility);
+        layer.style.visibility = 'hidden';
     }
     let doc = document;
     let win = window;
@@ -79,7 +80,7 @@ function hit_at(x, y) {
         }
     } finally {
         for (let i = 0; i < own_layers.length; i++) {
-            own_layers[i].style.display = saved[i];
+            own_layers[i].style.visibility = saved[i];
         }
     }
     return el === null ? null : { el: el, x: lx, y: ly, win: win };
@@ -264,23 +265,163 @@ function set_value(el, value) {
 }
 
 /*
- * type_at(hit, text, clear_first) — focus the field at the point and type text into it
+ * deep_focus(doc) -> the element that really has the focus: through same-origin iframes
+ *   and open shadow roots; null when it is the page itself or one of followMe's layers
  */
-function type_at(hit, text, clear_first) {
-    click_at(hit, 'click');
-    const doc = hit.el.ownerDocument;
-    const field = doc.activeElement !== null && doc.activeElement !== doc.body ? doc.activeElement : hit.el;
-    if (field.isContentEditable) {
-        if (clear_first) {
-            doc.execCommand('selectAll', false, null);
+function deep_focus(doc) {
+    let el = doc.activeElement;
+    while (el !== null) {
+        if (own_layers.indexOf(el) >= 0) {
+            return null;
         }
-        doc.execCommand('insertText', false, text);
+        if ((el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {
+            let inner = null;
+            try {
+                inner = el.contentDocument;
+            } catch (e) {
+                inner = null;
+            }
+            if (inner === null || inner.activeElement === null) {
+                return el;
+            }
+            el = inner.activeElement;
+        } else if (el.shadowRoot && el.shadowRoot.activeElement) {
+            el = el.shadowRoot.activeElement;
+        } else {
+            break;
+        }
+    }
+    return el === null || el === el.ownerDocument.body || el === el.ownerDocument.documentElement ? null : el;
+}
+
+/*
+ * typable(el) -> true if text can be typed into el
+ */
+function typable(el) {
+    return el !== null && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+}
+
+/*
+ * key_init(key) -> the init dictionary of a keyboard event for key
+ */
+function key_init(key) {
+    const code = KEY_CODES[key] !== undefined ? KEY_CODES[key] : key.toUpperCase().charCodeAt(0);
+    let name = key;
+    if (key.length === 1) {
+        name = /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : (/[0-9]/.test(key) ? `Digit${key}` : (key === ' ' ? 'Space' : ''));
+    }
+    return { key: key, code: name, keyCode: code, which: code, bubbles: true, cancelable: true, composed: true };
+}
+
+/*
+ * insert_char(field, ch) — type one character the way a key press does: keydown,
+ *   keypress, beforeinput, the new value, input, keyup (skipped if the page cancels it)
+ */
+function insert_char(field, ch) {
+    const win = field.ownerDocument.defaultView;
+    const init = key_init(ch);
+    if (!field.dispatchEvent(new win.KeyboardEvent('keydown', init))) {
+        field.dispatchEvent(new win.KeyboardEvent('keyup', init));
         return;
     }
-    if (field.tagName !== 'INPUT' && field.tagName !== 'TEXTAREA' && field.tagName !== 'SELECT') {
+    field.dispatchEvent(new win.KeyboardEvent('keypress', init));
+    const before = new win.InputEvent('beforeinput', { inputType: 'insertText', data: ch, bubbles: true, cancelable: true, composed: true });
+    if (field.dispatchEvent(before)) {
+        if (field.isContentEditable) {
+            field.ownerDocument.execCommand('insertText', false, ch);
+        } else {
+            const proto = field.tagName === 'TEXTAREA' ? win.HTMLTextAreaElement.prototype : win.HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(proto, 'value').set.call(field, field.value + ch);
+            field.dispatchEvent(new win.InputEvent('input', { inputType: 'insertText', data: ch, bubbles: true, composed: true }));
+        }
+    }
+    field.dispatchEvent(new win.KeyboardEvent('keyup', init));
+}
+
+/*
+ * type_into(run, field, text, step) -> Promise; types text into field as the step says
+ *   (clear first, key by key or all at once, Enter after)
+ */
+async function type_into(run, field, text, step) {
+    if (!typable(field)) {
+        throw new Error(`Nothing to type into: the focus is on ${describe_target(field)}.`);
+    }
+    if (typeof field.focus === 'function') {
+        field.focus({ preventScroll: true });
+    }
+    const doc = field.ownerDocument;
+    if (step.clear_first) {
+        if (field.isContentEditable) {
+            doc.execCommand('selectAll', false, null);
+            doc.execCommand('delete', false, null);
+        } else if (field.value !== '') {
+            set_value(field, '');
+        }
+    }
+    if (step.type_mode === 'keys') {
+        for (const ch of Array.from(text)) {
+            if (run !== null && run.stopped) {
+                return;
+            }
+            insert_char(field, ch);
+            await sleep(run, with_jitter(to_number(step.key_delay_ms, 60), to_number(step.key_delay_ms, 60) / 2), null);
+        }
+        if (!field.isContentEditable) {
+            field.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    } else if (field.isContentEditable) {
+        doc.execCommand('insertText', false, text);
+    } else {
+        set_value(field, field.value + text);
+    }
+    if (step.enter_after) {
+        press_key_on(field, 'Enter');
+    }
+}
+
+let last_page_focus = null;   // the page's last focused element, while followMe's panel has the focus
+
+/*
+ * watch_focus() — remember which element of the page last had the focus, so "type into
+ *   the focused field" still works after a click on followMe's panel (▶ Test this step)
+ */
+function watch_focus() {
+    document.addEventListener('focusin', function () {
+        const el = deep_focus(document);
+        if (el !== null) {
+            last_page_focus = el;
+        }
+    }, true);
+}
+
+/*
+ * focused_field() -> the field that has the focus (or had it before followMe's panel
+ *   took it); throws when there is none
+ */
+function focused_field() {
+    let el = deep_focus(document);
+    if (el === null && last_page_focus !== null && last_page_focus.isConnected) {
+        el = last_page_focus;
+    }
+    if (el === null) {
+        throw new Error('No field has the focus. Add a click on the field before this step, or set "Type into" to the field at a point.');
+    }
+    return el;
+}
+
+/*
+ * type_at(run, hit, text, step) -> Promise; click the field at the point, then type
+ */
+async function type_at(run, hit, text, step) {
+    click_at(hit, 'click');
+    let field = deep_focus(hit.el.ownerDocument);
+    if (!typable(field)) {
+        field = hit.el;
+    }
+    if (!typable(field)) {
         throw new Error(`Nothing to type into at that spot (found ${describe_target(field)}).`);
     }
-    set_value(field, clear_first ? text : field.value + text);
+    await type_into(run, field, text, step);
 }
 
 const READ_LIMIT = 10000;   // longest text a 'read' step keeps
@@ -311,21 +452,30 @@ function read_at(hit, pattern) {
 const KEY_CODES = { Enter: 13, Escape: 27, Tab: 9, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, ' ': 32 };
 
 /*
- * press_key(key) — key down, press and up on whatever has the focus; Enter in a form
- * field also submits its form (untrusted key events don't do that by themselves)
+ * press_key_on(el, key) — key down, press and up on el. Enter that the page doesn't
+ *   handle itself (doesn't cancel) submits the field's form, as a real Enter would —
+ *   untrusted key events don't do that by themselves. A search box like Google's is a
+ *   <textarea> in a form, so that counts too.
  */
-function press_key(key) {
-    const el = document.activeElement !== null ? document.activeElement : document.body;
-    const code = KEY_CODES[key] !== undefined ? KEY_CODES[key] : key.toUpperCase().charCodeAt(0);
-    const init = { key: key, code: key.length === 1 ? `Key${key.toUpperCase()}` : key, keyCode: code, which: code, bubbles: true, cancelable: true, composed: true };
-    const down = el.dispatchEvent(new KeyboardEvent('keydown', init));
+function press_key_on(el, key) {
+    const win = el.ownerDocument.defaultView;
+    const init = key_init(key);
+    const down = el.dispatchEvent(new win.KeyboardEvent('keydown', init));
     if (key.length === 1 || key === 'Enter') {
-        el.dispatchEvent(new KeyboardEvent('keypress', init));
+        el.dispatchEvent(new win.KeyboardEvent('keypress', init));
     }
-    el.dispatchEvent(new KeyboardEvent('keyup', init));
-    if (down && key === 'Enter' && el.form && el.tagName === 'INPUT') {
+    el.dispatchEvent(new win.KeyboardEvent('keyup', init));
+    if (down && key === 'Enter' && el.form && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
         el.form.requestSubmit();
     }
+}
+
+/*
+ * press_key(key) — press key on whatever has the focus (the page, if nothing has)
+ */
+function press_key(key) {
+    const el = deep_focus(document);
+    press_key_on(el === null ? document.body : el, key);
 }
 
 /*
@@ -371,6 +521,11 @@ async function do_action(run, step) {
         press_key(step.key);
         return undefined;
     }
+    const text = step.action === 'type' ? fill_vars(step.text, run === null ? null : run.vars) : '';
+    if (step.action === 'type' && step.type_into === 'focused') {
+        await type_into(run, focused_field(), text, step);
+        return undefined;
+    }
     const point = bring_into_view(step);
     const hit = hit_at(point.x, point.y);
     if (step.action === 'scroll') {
@@ -386,7 +541,7 @@ async function do_action(run, step) {
     if (step.action === 'long_press') {
         await long_press_at(run, hit, step.hold_ms);
     } else if (step.action === 'type') {
-        type_at(hit, fill_vars(step.text, run === null ? null : run.vars), step.clear_first);
+        await type_at(run, hit, text, step);
     } else {
         click_at(hit, step.action);
     }

@@ -1,7 +1,7 @@
 // ==Moss==
 // name:        followMe
 // namespace:   https://github.com/vididvidid/DailyScripts
-// version:     0.2.0
+// version:     0.3.0
 // description: Tap-by-pixel automation for any website: mark points on the page, chain clicks with pauses and "page loaded" / "URL changed" / "internet is on" checks, play them as desktop, mobile or tablet, hand off to another site in split view, and replay them. No selectors, no Puppeteer.
 // author:      vididvidid
 // homepage:    https://github.com/vididvidid/DailyScripts/tree/main/followMe
@@ -13,8 +13,12 @@
 //   - GM_xmlhttpRequest
 //   - GM_device
 //   - GM_split
+// connect:
 // # the internet check asks this page
-// connect:     www.gstatic.com
+//   - www.gstatic.com
+// # gist sync
+//   - api.github.com
+//   - gist.githubusercontent.com
 // ==/Moss==
 
 // Built by tools/build.mjs from src/ — edit those files, not this one.
@@ -170,6 +174,8 @@ function regex_of(pattern) {
  *     orientation: 'portrait' | 'landscape';     for mobile and tablet
  *     need_online: boolean;    only play while the internet is on
  *     offline: 'wait' | 'stop';   what to do when it is off
+ *     unsaved: string[];       ids of steps changed since the last Save ('' = the activity's
+ *                              own settings); kept here only, not in the gist
  *     steps: struct step[];
  *     created_at, updated_at: number;
  * }
@@ -184,6 +190,11 @@ function regex_of(pattern) {
  *     view_w, view_h: number;       window size when it was marked ('scaled')
  *     text: string;            'type': what to type; {name} puts in a value read earlier
  *     clear_first: boolean;    'type': empty the field first
+ *     type_into: 'point' | 'focused';   'type': click the field at x, y first, or type into
+ *                              the field that has the focus (a click step before put it there)
+ *     type_mode: 'keys' | 'paste';   'type': one key at a time, or all at once
+ *     key_delay_ms: number;    'type' key by key: pause between two keys
+ *     enter_after: boolean;    'type': press Enter when done (submits a search box)
  *     key: string;             'key': "Enter", "Escape", "Tab", "a", …
  *     scroll_dx, scroll_dy: number;   'scroll': how far
  *     hold_ms: number;         'long_press': how long the button stays down
@@ -244,13 +255,17 @@ const PLACES = {
     scaled: 'Same spot relative to the window size',
 };
 
+const TYPE_INTO = { focused: 'the field that has the focus (click it in the step before)', point: 'the field at a point (clicks it first)' };
+const TYPE_MODES = { keys: 'key by key', paste: 'all at once' };
+
 const SIDE_HOWS = { auto: 'split view (or a window)', split: 'split view only', window: 'a window beside this one' };
 
 const DEFAULT_TIMEOUT = 30000;
 
 // Fields added after 0.1.0, filled in on activities and steps stored before.
-const ACTIVITY_DEFAULTS = { start_url: '', device: 'desktop', orientation: 'portrait', need_online: true, offline: 'wait' };
+const ACTIVITY_DEFAULTS = { start_url: '', device: 'desktop', orientation: 'portrait', need_online: true, offline: 'wait', unsaved: [] };
 const STEP_DEFAULTS = {
+    type_into: 'point', type_mode: 'paste', key_delay_ms: 60, enter_after: false,
     var_name: 'answer', read_pattern: '', side_activity: '', side_url: '', side_how: 'auto', side_place: 'right',
     side_timeout_ms: 120000, side_close: true,
 };
@@ -295,6 +310,10 @@ function step_create(x, y, view) {
         view_h: Math.round(view.h),
         text: '',
         clear_first: true,
+        type_into: 'point',
+        type_mode: 'keys',
+        key_delay_ms: 60,
+        enter_after: false,
         key: 'Enter',
         scroll_dx: 0,
         scroll_dy: 400,
@@ -315,6 +334,16 @@ function step_create(x, y, view) {
         jitter_ms: 0,
         enabled: true,
     };
+}
+
+/*
+ * step_has_point(step) -> true if the step acts at its x, y (and gets a mark on the page)
+ */
+function step_has_point(step) {
+    if (step.action === 'type') {
+        return step.type_into !== 'focused';
+    }
+    return ACTIONS[step.action].point;
 }
 
 /*
@@ -417,7 +446,7 @@ function describe_action(step) {
     case 'long_press':
         return `press and hold ${format_ms(step.hold_ms)} ${at}`;
     case 'type':
-        return `type "${step.text}" into the field ${at}`;
+        return `type "${step.text}"${step.type_into === 'focused' ? ' into the focused field' : ` into the field ${at}`}${step.enter_after ? ', then Enter' : ''}`;
     case 'key':
         return `press ${step.key}`;
     case 'read':
@@ -443,7 +472,7 @@ function describe_how(step) {
     case 'long_press':
         return 'Presses the left button on whatever is at that pixel, keeps it down for the hold time, then releases it.';
     case 'type':
-        return `Clicks the field at that pixel to focus it${step.clear_first ? ', empties it' : ''}, then types the text and tells the page the value changed (input and change events).`;
+        return `${step.type_into === 'focused' ? 'Takes the field that has the focus (the one the step before clicked)' : 'Clicks the field at that pixel to focus it'}${step.clear_first ? ', empties it' : ''}, then types the text ${step.type_mode === 'keys' ? 'one key at a time (key down, input, key up for each character), so search boxes show their suggestions' : 'all at once'} and tells the page the value changed.${step.enter_after ? ' Then it presses Enter; if the page doesn\'t handle that itself, the field\'s form is submitted.' : ''}`;
     case 'key':
         return 'Sends key down, key press and key up to whatever has the focus. Enter in a form field also submits the form.';
     case 'scroll':
@@ -541,6 +570,7 @@ function activity_duration(activity) {
  *     tab_y: number;          where the edge tab sits, 0..1 of the window height
  *     last_activity: string;  activity open in the panel, reopened after a reload
  *     online_url: string;     page asked to tell whether the internet is on
+ *     pinned: boolean;        the panel lives in Chrome's side panel
  * }
  *
  * struct saved_run {
@@ -566,7 +596,7 @@ const RESUME_WINDOW_MS = 120000;   // a saved run older than this is not resumed
  * prefs_default() -> struct prefs
  */
 function prefs_default() {
-    return { open: false, side: 'right', show_marks: true, tab_y: 0.4, last_activity: '', online_url: ONLINE_URL };
+    return { open: false, side: 'right', show_marks: true, tab_y: 0.4, last_activity: '', online_url: ONLINE_URL, pinned: false };
 }
 
 /*
@@ -641,6 +671,7 @@ function remove_activity(id) {
     const all = load_all();
     delete all[id];
     GM_setValue(ACTIVITIES_KEY, all);
+    mark_deleted(id);
 }
 
 /*
@@ -752,6 +783,415 @@ function all_activities() {
         return a.name.localeCompare(b.name);
     });
     return out;
+}
+
+// ---------- src/core/gist.js ----------
+
+/*
+ * Keeping every activity in a private GitHub gist, as a backup and to share them
+ * between computers. Each activity is one readable file in the gist
+ * ("example.com--checkout--k9x-3.json"), and _followme.json lists deleted ones. The gist
+ * keeps every earlier version (its revisions), so any old state can be brought back.
+ *
+ * A sync reads the gist, merges it with the activities here (per activity the newer one
+ * wins; a deletion wins over anything older), stores the result here and writes back
+ * whatever changed. It runs when you press Save, add a step, delete or import an
+ * activity, and when followMe starts on a page (at most once a minute).
+ *
+ * GM values:
+ *     fm_gist     struct gist_conf
+ *     fm_deleted  { [activity id]: when it was deleted }
+ *
+ * struct gist_conf {
+ *     token: string;           GitHub token with the "gist" scope
+ *     gist_id: string;
+ *     auto: boolean;           sync on save / add / start-up
+ *     last_sync: number;       when the last sync finished, 0 = never
+ *     error: string;           what went wrong last time, '' = fine
+ *     url: string;             the gist's page
+ * }
+ */
+
+const GIST_KEY = 'fm_gist';
+const DELETED_KEY = 'fm_deleted';
+const GIST_META = '_followme.json';
+const GIST_API = 'https://api.github.com';
+const GIST_PULL_EVERY_MS = 60000;      // start-up syncs at most this often
+const DELETED_KEEP_MS = 90 * 86400000; // forget deletions after 90 days
+
+const gist = { busy: null, again: false, timer: 0, listeners: [] };
+
+/*
+ * gist_conf() -> struct gist_conf
+ */
+function gist_conf() {
+    return Object.assign({ token: '', gist_id: '', auto: true, last_sync: 0, error: '', url: '' }, GM_getValue(GIST_KEY, {}));
+}
+
+/*
+ * gist_conf_set(change) -> struct gist_conf after merging change into it
+ */
+function gist_conf_set(change) {
+    const conf = Object.assign(gist_conf(), change);
+    GM_setValue(GIST_KEY, conf);
+    for (const fn of gist.listeners) {
+        try {
+            fn(conf);
+        } catch (e) {
+            console.error('followMe:', e);
+        }
+    }
+    return conf;
+}
+
+/*
+ * on_gist_change(fn) — fn(conf) after every sync or settings change
+ */
+function on_gist_change(fn) {
+    gist.listeners.push(fn);
+}
+
+/*
+ * gist_ready() -> true when a token and a gist are set
+ */
+function gist_ready() {
+    const conf = gist_conf();
+    return conf.token !== '' && conf.gist_id !== '';
+}
+
+/*
+ * mark_deleted(id) — remember a deletion so the sync removes it everywhere
+ */
+function mark_deleted(id) {
+    const deleted = GM_getValue(DELETED_KEY, {});
+    deleted[id] = Date.now();
+    GM_setValue(DELETED_KEY, deleted);
+}
+
+/*
+ * github(token, method, url, body) -> Promise of the parsed JSON answer; throws with
+ *   GitHub's message on an error
+ */
+function github(token, method, url, body) {
+    return new Promise(function (resolve, reject) {
+        GM_xmlhttpRequest({
+            method: method,
+            url: url.startsWith('https://') ? url : `${GIST_API}${url}`,
+            headers: {
+                Accept: 'application/vnd.github+json',
+                Authorization: `Bearer ${token}`,
+                'X-GitHub-Api-Version': '2022-11-28',
+                'Content-Type': 'application/json',
+            },
+            data: body === undefined ? undefined : JSON.stringify(body),
+            timeout: 20000,
+            anonymous: true,
+            onload: function (response) {
+                let data = null;
+                try {
+                    data = response.responseText ? JSON.parse(response.responseText) : null;
+                } catch (e) {
+                    data = response.responseText;
+                }
+                if (response.status >= 200 && response.status < 300) {
+                    resolve(data);
+                    return;
+                }
+                let why = data !== null && data.message ? data.message : `HTTP ${response.status}`;
+                if (response.status === 401) {
+                    why = 'the token is wrong or expired';
+                } else if (response.status === 404) {
+                    why = 'gist not found (or the token lacks the "gist" scope)';
+                }
+                reject(new Error(`GitHub: ${why}`));
+            },
+            onerror: function () {
+                reject(new Error('GitHub could not be reached'));
+            },
+            ontimeout: function () {
+                reject(new Error('GitHub did not answer in time'));
+            },
+        });
+    });
+}
+
+/*
+ * slug(text) -> "my-checkout-flow", safe for a file name
+ */
+function slug(text) {
+    const s = String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    return s.slice(0, 40) || 'activity';
+}
+
+/*
+ * gist_file_name(activity) -> "example.com--checkout--k9x-3.json"
+ */
+function gist_file_name(activity) {
+    let host = 'site';
+    try {
+        host = new URL(activity.site).hostname || 'site';
+    } catch (e) {
+        host = 'site';
+    }
+    return `${host}--${slug(activity.name)}--${slug(activity.id.slice(-8))}.json`;
+}
+
+/*
+ * gist_content(activity) -> the activity as stored in the gist (no local-only fields)
+ */
+function gist_content(activity) {
+    const copy = clone(activity);
+    delete copy.unsaved;
+    return `${JSON.stringify(copy, null, 2)}\n`;
+}
+
+/*
+ * meta_content(deleted) -> the text of _followme.json
+ */
+function meta_content(deleted) {
+    return `${JSON.stringify({
+        followme: 2,
+        about: 'followMe activities (https://github.com/vididvidid/DailyScripts/tree/main/followMe). One file per activity; this file lists deleted ones. Older versions: the gist\'s Revisions.',
+        deleted: deleted,
+    }, null, 2)}\n`;
+}
+
+/*
+ * read_gist(conf) -> Promise<{ activities: { [id]: { activity, file, text } }, deleted, meta_text, url }>
+ */
+async function read_gist(conf) {
+    const data = await github(conf.token, 'GET', `/gists/${encodeURIComponent(conf.gist_id)}`);
+    const out = { activities: {}, deleted: {}, meta_text: '', url: data.html_url || '' };
+    for (const name of Object.keys(data.files || {})) {
+        const file = data.files[name];
+        let text = file.content || '';
+        if (file.truncated && file.raw_url) {
+            text = await github(conf.token, 'GET', file.raw_url).then(function (raw) {
+                return typeof raw === 'string' ? raw : JSON.stringify(raw);
+            });
+        }
+        let parsed = null;
+        try {
+            parsed = JSON.parse(text);
+        } catch (e) {
+            parsed = null;
+        }
+        if (parsed === null || typeof parsed !== 'object') {
+            continue;
+        }
+        if (name === GIST_META) {
+            out.deleted = parsed.deleted || {};
+            out.meta_text = text;
+        } else if (typeof parsed.id === 'string' && Array.isArray(parsed.steps)) {
+            out.activities[parsed.id] = { activity: activity_fix(parsed), file: name, text: text };
+        }
+    }
+    return out;
+}
+
+/*
+ * merge_deleted(a, b) -> every deletion of both, the later time when both have one;
+ *   old ones are dropped
+ */
+function merge_deleted(a, b) {
+    const out = {};
+    for (const source of [a, b]) {
+        for (const id of Object.keys(source)) {
+            if (Date.now() - source[id] < DELETED_KEEP_MS && (out[id] === undefined || source[id] > out[id])) {
+                out[id] = source[id];
+            }
+        }
+    }
+    return out;
+}
+
+/*
+ * merge_activities(local, remote, deleted) -> { [id]: struct activity } after the sync:
+ *   the newer copy of each, minus the deleted ones
+ */
+function merge_activities(local, remote, deleted) {
+    const out = {};
+    const ids = Object.keys(local);
+    for (const id of Object.keys(remote)) {
+        if (ids.indexOf(id) < 0) {
+            ids.push(id);
+        }
+    }
+    for (const id of ids) {
+        const mine = local[id];
+        const theirs = remote[id] === undefined ? undefined : remote[id].activity;
+        let pick = mine;
+        if (mine === undefined || (theirs !== undefined && theirs.updated_at > mine.updated_at)) {
+            pick = theirs;
+            if (mine !== undefined && mine.unsaved) {
+                pick = Object.assign({}, theirs, { unsaved: [] });
+            }
+        }
+        if (deleted[id] !== undefined && deleted[id] >= pick.updated_at) {
+            continue;
+        }
+        out[id] = pick;
+    }
+    return out;
+}
+
+/*
+ * sync_once() -> Promise<{ pulled, pushed }>: one full sync (read, merge, write back)
+ */
+async function sync_once() {
+    const conf = gist_conf();
+    const remote = await read_gist(conf);
+    const local = load_all();
+    const deleted = merge_deleted(GM_getValue(DELETED_KEY, {}), remote.deleted);
+    const merged = merge_activities(local, remote.activities, deleted);
+
+    // Here: take what the gist had newer, drop what was deleted elsewhere.
+    let pulled = 0;
+    for (const id of Object.keys(merged)) {
+        if (local[id] === undefined || merged[id].updated_at !== local[id].updated_at) {
+            pulled++;
+        }
+    }
+    for (const id of Object.keys(local)) {
+        if (merged[id] === undefined) {
+            pulled++;
+        }
+    }
+    if (pulled > 0) {
+        GM_setValue(ACTIVITIES_KEY, merged);
+    }
+    GM_setValue(DELETED_KEY, deleted);
+
+    // There: write the files that differ, remove the ones no longer wanted.
+    const files = {};
+    let pushed = 0;
+    for (const id of Object.keys(merged)) {
+        const name = gist_file_name(merged[id]);
+        const text = gist_content(merged[id]);
+        const old = remote.activities[id];
+        if (old !== undefined && old.file !== name) {
+            files[old.file] = null;
+        }
+        if (old === undefined || old.file !== name || old.text !== text) {
+            files[name] = { content: text };
+            pushed++;
+        }
+    }
+    for (const id of Object.keys(remote.activities)) {
+        if (merged[id] === undefined) {
+            files[remote.activities[id].file] = null;
+            pushed++;
+        }
+    }
+    const meta = meta_content(deleted);
+    if (meta !== remote.meta_text) {
+        files[GIST_META] = { content: meta };
+    }
+    if (Object.keys(files).length > 0) {
+        await github(conf.token, 'PATCH', `/gists/${encodeURIComponent(conf.gist_id)}`, { files: files });
+    }
+    gist_conf_set({ last_sync: Date.now(), error: '', url: remote.url });
+    return { pulled: pulled, pushed: pushed };
+}
+
+/*
+ * gist_sync() -> Promise<{ pulled, pushed } | null>; null when no gist is set. Syncs
+ *   one at a time: a call during a sync runs once more after it.
+ */
+function gist_sync() {
+    if (!gist_ready()) {
+        return Promise.resolve(null);
+    }
+    if (gist.busy !== null) {
+        gist.again = true;
+        return gist.busy;
+    }
+    gist.busy = sync_once().catch(function (e) {
+        gist_conf_set({ error: e.message });
+        throw e;
+    }).finally(function () {
+        gist.busy = null;
+        if (gist.again) {
+            gist.again = false;
+            gist_sync().catch(function () {});
+        }
+    });
+    return gist.busy;
+}
+
+/*
+ * gist_sync_soon() — sync in a moment (adding several steps quickly syncs once)
+ */
+function gist_sync_soon() {
+    if (!gist_ready() || !gist_conf().auto) {
+        return;
+    }
+    clearTimeout(gist.timer);
+    gist.timer = setTimeout(function () {
+        gist_sync().catch(function (e) {
+            console.warn('followMe: gist sync failed:', e.message);
+        });
+    }, 1500);
+}
+
+/*
+ * gist_sync_on_start() -> Promise; the start-up sync, at most once a minute
+ */
+function gist_sync_on_start() {
+    const conf = gist_conf();
+    if (!gist_ready() || !conf.auto || Date.now() - conf.last_sync < GIST_PULL_EVERY_MS) {
+        return Promise.resolve(null);
+    }
+    return gist_sync().catch(function (e) {
+        console.warn('followMe: gist sync failed:', e.message);
+        return null;
+    });
+}
+
+/*
+ * gist_connect(token, gist_id) -> Promise<struct gist_conf>: use that gist, or find the
+ *   followMe gist of that account, or make a new private one; then sync
+ */
+async function gist_connect(token, gist_id) {
+    let id = gist_id.trim();
+    const match = /([0-9a-f]{20,})\/?$/i.exec(id);
+    if (match !== null) {
+        id = match[1]; // a pasted gist URL
+    }
+    if (id === '') {
+        const list = await github(token, 'GET', '/gists?per_page=100');
+        for (const item of list) {
+            if (item.files && item.files[GIST_META] !== undefined) {
+                id = item.id;
+                break;
+            }
+        }
+    }
+    if (id === '') {
+        const made = await github(token, 'POST', '/gists', {
+            description: 'followMe activities — synced by followMe (Moss)',
+            public: false,
+            files: { [GIST_META]: { content: meta_content({}) } },
+        });
+        id = made.id;
+    }
+    gist_conf_set({ token: token, gist_id: id, error: '', last_sync: 0 });
+    await gist_sync();
+    return gist_conf();
+}
+
+/*
+ * gist_disconnect() — stop syncing (the gist itself stays on GitHub)
+ */
+function gist_disconnect() {
+    gist_conf_set({ token: '', gist_id: '', last_sync: 0, error: '', url: '' });
+}
+
+/*
+ * backup_text() -> every activity as one JSON file, for a download
+ */
+function backup_text() {
+    return export_activities(all_activities());
 }
 
 // ---------- src/core/net.js ----------
@@ -1132,11 +1572,12 @@ function view_now() {
  */
 function hit_at(x, y) {
     // Hide followMe's layers for the lookup (marks sit right on the target pixels).
-    // It all happens before the next paint, so nothing flickers.
+    // visibility, not display: hit testing skips hidden boxes, but they keep their
+    // layout and scroll position, and it is put back before the next paint.
     const saved = [];
     for (const layer of own_layers) {
-        saved.push(layer.style.display);
-        layer.style.display = 'none';
+        saved.push(layer.style.visibility);
+        layer.style.visibility = 'hidden';
     }
     let doc = document;
     let win = window;
@@ -1165,7 +1606,7 @@ function hit_at(x, y) {
         }
     } finally {
         for (let i = 0; i < own_layers.length; i++) {
-            own_layers[i].style.display = saved[i];
+            own_layers[i].style.visibility = saved[i];
         }
     }
     return el === null ? null : { el: el, x: lx, y: ly, win: win };
@@ -1350,23 +1791,163 @@ function set_value(el, value) {
 }
 
 /*
- * type_at(hit, text, clear_first) — focus the field at the point and type text into it
+ * deep_focus(doc) -> the element that really has the focus: through same-origin iframes
+ *   and open shadow roots; null when it is the page itself or one of followMe's layers
  */
-function type_at(hit, text, clear_first) {
-    click_at(hit, 'click');
-    const doc = hit.el.ownerDocument;
-    const field = doc.activeElement !== null && doc.activeElement !== doc.body ? doc.activeElement : hit.el;
-    if (field.isContentEditable) {
-        if (clear_first) {
-            doc.execCommand('selectAll', false, null);
+function deep_focus(doc) {
+    let el = doc.activeElement;
+    while (el !== null) {
+        if (own_layers.indexOf(el) >= 0) {
+            return null;
         }
-        doc.execCommand('insertText', false, text);
+        if ((el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {
+            let inner = null;
+            try {
+                inner = el.contentDocument;
+            } catch (e) {
+                inner = null;
+            }
+            if (inner === null || inner.activeElement === null) {
+                return el;
+            }
+            el = inner.activeElement;
+        } else if (el.shadowRoot && el.shadowRoot.activeElement) {
+            el = el.shadowRoot.activeElement;
+        } else {
+            break;
+        }
+    }
+    return el === null || el === el.ownerDocument.body || el === el.ownerDocument.documentElement ? null : el;
+}
+
+/*
+ * typable(el) -> true if text can be typed into el
+ */
+function typable(el) {
+    return el !== null && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+}
+
+/*
+ * key_init(key) -> the init dictionary of a keyboard event for key
+ */
+function key_init(key) {
+    const code = KEY_CODES[key] !== undefined ? KEY_CODES[key] : key.toUpperCase().charCodeAt(0);
+    let name = key;
+    if (key.length === 1) {
+        name = /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : (/[0-9]/.test(key) ? `Digit${key}` : (key === ' ' ? 'Space' : ''));
+    }
+    return { key: key, code: name, keyCode: code, which: code, bubbles: true, cancelable: true, composed: true };
+}
+
+/*
+ * insert_char(field, ch) — type one character the way a key press does: keydown,
+ *   keypress, beforeinput, the new value, input, keyup (skipped if the page cancels it)
+ */
+function insert_char(field, ch) {
+    const win = field.ownerDocument.defaultView;
+    const init = key_init(ch);
+    if (!field.dispatchEvent(new win.KeyboardEvent('keydown', init))) {
+        field.dispatchEvent(new win.KeyboardEvent('keyup', init));
         return;
     }
-    if (field.tagName !== 'INPUT' && field.tagName !== 'TEXTAREA' && field.tagName !== 'SELECT') {
+    field.dispatchEvent(new win.KeyboardEvent('keypress', init));
+    const before = new win.InputEvent('beforeinput', { inputType: 'insertText', data: ch, bubbles: true, cancelable: true, composed: true });
+    if (field.dispatchEvent(before)) {
+        if (field.isContentEditable) {
+            field.ownerDocument.execCommand('insertText', false, ch);
+        } else {
+            const proto = field.tagName === 'TEXTAREA' ? win.HTMLTextAreaElement.prototype : win.HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(proto, 'value').set.call(field, field.value + ch);
+            field.dispatchEvent(new win.InputEvent('input', { inputType: 'insertText', data: ch, bubbles: true, composed: true }));
+        }
+    }
+    field.dispatchEvent(new win.KeyboardEvent('keyup', init));
+}
+
+/*
+ * type_into(run, field, text, step) -> Promise; types text into field as the step says
+ *   (clear first, key by key or all at once, Enter after)
+ */
+async function type_into(run, field, text, step) {
+    if (!typable(field)) {
+        throw new Error(`Nothing to type into: the focus is on ${describe_target(field)}.`);
+    }
+    if (typeof field.focus === 'function') {
+        field.focus({ preventScroll: true });
+    }
+    const doc = field.ownerDocument;
+    if (step.clear_first) {
+        if (field.isContentEditable) {
+            doc.execCommand('selectAll', false, null);
+            doc.execCommand('delete', false, null);
+        } else if (field.value !== '') {
+            set_value(field, '');
+        }
+    }
+    if (step.type_mode === 'keys') {
+        for (const ch of Array.from(text)) {
+            if (run !== null && run.stopped) {
+                return;
+            }
+            insert_char(field, ch);
+            await sleep(run, with_jitter(to_number(step.key_delay_ms, 60), to_number(step.key_delay_ms, 60) / 2), null);
+        }
+        if (!field.isContentEditable) {
+            field.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    } else if (field.isContentEditable) {
+        doc.execCommand('insertText', false, text);
+    } else {
+        set_value(field, field.value + text);
+    }
+    if (step.enter_after) {
+        press_key_on(field, 'Enter');
+    }
+}
+
+let last_page_focus = null;   // the page's last focused element, while followMe's panel has the focus
+
+/*
+ * watch_focus() — remember which element of the page last had the focus, so "type into
+ *   the focused field" still works after a click on followMe's panel (▶ Test this step)
+ */
+function watch_focus() {
+    document.addEventListener('focusin', function () {
+        const el = deep_focus(document);
+        if (el !== null) {
+            last_page_focus = el;
+        }
+    }, true);
+}
+
+/*
+ * focused_field() -> the field that has the focus (or had it before followMe's panel
+ *   took it); throws when there is none
+ */
+function focused_field() {
+    let el = deep_focus(document);
+    if (el === null && last_page_focus !== null && last_page_focus.isConnected) {
+        el = last_page_focus;
+    }
+    if (el === null) {
+        throw new Error('No field has the focus. Add a click on the field before this step, or set "Type into" to the field at a point.');
+    }
+    return el;
+}
+
+/*
+ * type_at(run, hit, text, step) -> Promise; click the field at the point, then type
+ */
+async function type_at(run, hit, text, step) {
+    click_at(hit, 'click');
+    let field = deep_focus(hit.el.ownerDocument);
+    if (!typable(field)) {
+        field = hit.el;
+    }
+    if (!typable(field)) {
         throw new Error(`Nothing to type into at that spot (found ${describe_target(field)}).`);
     }
-    set_value(field, clear_first ? text : field.value + text);
+    await type_into(run, field, text, step);
 }
 
 const READ_LIMIT = 10000;   // longest text a 'read' step keeps
@@ -1397,21 +1978,30 @@ function read_at(hit, pattern) {
 const KEY_CODES = { Enter: 13, Escape: 27, Tab: 9, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, ' ': 32 };
 
 /*
- * press_key(key) — key down, press and up on whatever has the focus; Enter in a form
- * field also submits its form (untrusted key events don't do that by themselves)
+ * press_key_on(el, key) — key down, press and up on el. Enter that the page doesn't
+ *   handle itself (doesn't cancel) submits the field's form, as a real Enter would —
+ *   untrusted key events don't do that by themselves. A search box like Google's is a
+ *   <textarea> in a form, so that counts too.
  */
-function press_key(key) {
-    const el = document.activeElement !== null ? document.activeElement : document.body;
-    const code = KEY_CODES[key] !== undefined ? KEY_CODES[key] : key.toUpperCase().charCodeAt(0);
-    const init = { key: key, code: key.length === 1 ? `Key${key.toUpperCase()}` : key, keyCode: code, which: code, bubbles: true, cancelable: true, composed: true };
-    const down = el.dispatchEvent(new KeyboardEvent('keydown', init));
+function press_key_on(el, key) {
+    const win = el.ownerDocument.defaultView;
+    const init = key_init(key);
+    const down = el.dispatchEvent(new win.KeyboardEvent('keydown', init));
     if (key.length === 1 || key === 'Enter') {
-        el.dispatchEvent(new KeyboardEvent('keypress', init));
+        el.dispatchEvent(new win.KeyboardEvent('keypress', init));
     }
-    el.dispatchEvent(new KeyboardEvent('keyup', init));
-    if (down && key === 'Enter' && el.form && el.tagName === 'INPUT') {
+    el.dispatchEvent(new win.KeyboardEvent('keyup', init));
+    if (down && key === 'Enter' && el.form && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
         el.form.requestSubmit();
     }
+}
+
+/*
+ * press_key(key) — press key on whatever has the focus (the page, if nothing has)
+ */
+function press_key(key) {
+    const el = deep_focus(document);
+    press_key_on(el === null ? document.body : el, key);
 }
 
 /*
@@ -1457,6 +2047,11 @@ async function do_action(run, step) {
         press_key(step.key);
         return undefined;
     }
+    const text = step.action === 'type' ? fill_vars(step.text, run === null ? null : run.vars) : '';
+    if (step.action === 'type' && step.type_into === 'focused') {
+        await type_into(run, focused_field(), text, step);
+        return undefined;
+    }
     const point = bring_into_view(step);
     const hit = hit_at(point.x, point.y);
     if (step.action === 'scroll') {
@@ -1472,7 +2067,7 @@ async function do_action(run, step) {
     if (step.action === 'long_press') {
         await long_press_at(run, hit, step.hold_ms);
     } else if (step.action === 'type') {
-        type_at(hit, fill_vars(step.text, run === null ? null : run.vars), step.clear_first);
+        await type_at(run, hit, text, step);
     } else {
         click_at(hit, step.action);
     }
@@ -1975,6 +2570,13 @@ const PANEL_CSS = `
 @media (max-width: 600px) {
   .panel, .panel.left, .panel.right { left: 0; right: 0; top: auto; width: auto; height: 55vh; border: 0; border-top: 1px solid var(--line); border-radius: 12px 12px 0 0; }
 }
+.unsaved { margin-left: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); }
+.note { padding: 6px 8px; border-radius: 6px; background: var(--bg2); } .note.bad { color: var(--bad); }
+.howto { margin: 0; padding-left: 18px; } .howto a { color: var(--accent); }
+a.btn { text-decoration: none; color: inherit; display: inline-block; }
+/* In Chrome's side panel: fill it (and never become the phone-width bottom sheet). */
+.panel.in-side, .panel.in-side.left, .panel.in-side.right { position: fixed !important; inset: 0 !important; width: auto !important;
+  height: auto !important; max-width: none !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
 .net { border: 0; background: transparent; font-size: 11px; color: var(--muted); padding: 2px 4px; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .net::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .net.on::before { background: var(--ok); } .net.off { color: var(--bad); } .net.off::before { background: var(--bad); }
@@ -1987,6 +2589,7 @@ const PANEL_CSS = `
 .status.done { background: var(--bg2); } .status.failed { background: #ffe3e3; color: #a51d1d; }
 @media (prefers-color-scheme: dark) { .status.failed { background: #3b1e1e; color: #ffb3b3; } }
 .status .text { flex: 1; }
+.status[hidden] { display: none; }
 .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--bg); }
 .card.clickable { cursor: pointer; } .card.clickable:hover { border-color: var(--accent); }
 .card h3 { margin: 0; font-size: 14px; }
@@ -2211,6 +2814,9 @@ function pick_point(number) {
          */
         function finish(point) {
             picking = null;
+            if (frame !== 0) {
+                cancelAnimationFrame(frame);
+            }
             document.removeEventListener('keydown', on_key, true);
             layer_remove(layer);
             resolve(point);
@@ -2227,9 +2833,16 @@ function pick_point(number) {
             }
         }
 
-        overlay.addEventListener('pointermove', function (event) {
-            const x = event.clientX;
-            const y = event.clientY;
+        let frame = 0;
+        let last = null;
+
+        /*
+         * follow() — move the crosshair to the last pointer position, once per frame
+         */
+        function follow() {
+            frame = 0;
+            const x = last.clientX;
+            const y = last.clientY;
             hline.style.top = `${y}px`;
             vline.style.left = `${x}px`;
             const hit = hit_at(x, y);   // the picker layer itself is skipped
@@ -2238,6 +2851,13 @@ function pick_point(number) {
             info.style.left = right ? '' : `${x + 14}px`;
             info.style.right = right ? `${window.innerWidth - x + 14}px` : '';
             info.style.top = `${Math.min(y + 14, window.innerHeight - 50)}px`;
+        }
+
+        overlay.addEventListener('pointermove', function (event) {
+            last = event;
+            if (frame === 0) {
+                frame = requestAnimationFrame(follow);
+            }
         });
         overlay.addEventListener('click', function (event) {
             event.preventDefault();
@@ -2267,10 +2887,11 @@ function pick_point(number) {
  *     active: number;                     step being played, or -1
  *     on_move(index, x, y);               a mark was dragged to (x, y)
  *     frame: number;                      pending animation frame, or 0
+ *     drawn: string;                      what is on screen, to skip redrawing the same
  * }
  */
 
-const marks = { layer: null, activity: null, selected: -1, active: -1, on_move: null, frame: 0 };
+const marks = { layer: null, activity: null, selected: -1, active: -1, on_move: null, frame: 0, drawn: '' };
 
 /*
  * marks_set(activity, selected, on_move) — show these marks (activity null hides them)
@@ -2347,17 +2968,23 @@ function marks_render() {
         }
         return;
     }
+    const view = view_now();
+    // The same marks in the same place: leave them (no flicker, the pulse keeps going).
+    const key = JSON.stringify([marks.activity.steps, marks.selected, marks.active, view]);
+    if (marks.layer !== null && key === marks.drawn) {
+        return;
+    }
+    marks.drawn = key;
     if (marks.layer === null) {
         marks.layer = layer_create('marks', MARKS_CSS);
     }
-    const view = view_now();
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     const dots = [];
     let prev = null;
     const steps = marks.activity.steps;
     for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
-        if (!ACTIONS[step.action].point) {
+        if (!step_has_point(step)) {
             continue;
         }
         const p = step_point(step, view);
@@ -2408,11 +3035,15 @@ window.addEventListener('resize', marks_render_soon);
  *             on the screen (a small map of the window, the pixel, what is there right
  *             now), what it does, how it does it, what it waits for before and after,
  *             and the break before the next step.
- * Plus a third, 'transfer', for exporting and importing activities as JSON.
+ * Plus 'transfer', for exporting and importing activities as JSON, and 'sync', for the
+ * GitHub gist that keeps them all.
+ *
+ * Every change is kept at once (nothing is lost if you forget to save). A step changed
+ * since the last Save shows "unsaved"; Save marks it saved and updates the gist.
  *
  * struct panel (one, below) {
  *     layer: struct layer | null;
- *     view: 'list' | 'detail' | 'transfer';
+ *     view: 'list' | 'detail' | 'transfer' | 'sync';
  *     activity: struct activity | null;   the one open in 'detail'
  *     open_step: number;                  step whose details are shown, or -1
  *     prefs: struct prefs;
@@ -2420,10 +3051,20 @@ window.addEventListener('resize', marks_render_soon);
  *     rows: HTMLElement[];                step rows, to mark the playing one
  *     hidden: boolean;                    hidden while marking a point
  *     net: HTMLElement | null;            the "online / offline" light in the header
+ *     cloud: HTMLElement | null;          the gist button in the footer
+ *     side: GM_sidePanel handle | null;   mirroring the panel into Chrome's side panel
+ *     side_shown: boolean;                the side panel shows it (the page doesn't)
  * }
+ *
+ * Pinned (prefs.pinned), the panel is drawn the same way but shown in Chrome's side
+ * panel through Moss (GM_sidePanel): next to the page instead of over it, and full size
+ * even while the tab is shown as a phone. Its clicks come back here and run as usual.
  */
 
-const panel = { layer: null, view: 'list', activity: null, open_step: -1, prefs: null, status: null, rows: [], hidden: false, net: null };
+const panel = {
+    layer: null, view: 'list', activity: null, open_step: -1, prefs: null, status: null, rows: [], hidden: false, net: null, cloud: null,
+    side: null, side_shown: false,
+};
 
 // ---------- opening and closing ----------
 
@@ -2441,6 +3082,10 @@ function panel_open() {
  * panel_close() — hide the panel (and the marks, unless a run is playing)
  */
 function panel_close() {
+    if (panel.side_shown) {
+        unpin();
+        return;
+    }
     panel.prefs.open = false;
     save_prefs(panel.prefs);
     if (panel.layer !== null) {
@@ -2464,6 +3109,79 @@ function panel_toggle() {
     }
 }
 
+/*
+ * panel_visible() -> true if the panel is to be drawn (in the page or the side panel)
+ */
+function panel_visible() {
+    return panel.prefs.open || panel.side_shown;
+}
+
+// ---------- the side panel ----------
+
+/*
+ * side_start() — offer the panel to Moss's side panel (shown once that is open)
+ */
+function side_start() {
+    if (panel.side === null && typeof GM_sidePanel !== 'undefined') {
+        panel.side = GM_sidePanel.mirror(panel.layer === null ? null : panel.layer.root, { title: 'followMe', on_show: side_on_show });
+    }
+}
+
+/*
+ * side_on_show(shown) — the side panel started or stopped showing the panel
+ */
+function side_on_show(shown) {
+    panel.side_shown = shown;
+    if (shown) {
+        panel_render();
+    } else if (panel.layer !== null) {
+        if (panel.prefs.open) {
+            panel_render();
+        } else {
+            layer_remove(panel.layer);
+            panel.layer = null;
+        }
+    }
+    tab_render();
+}
+
+/*
+ * pin() — move the panel into Chrome's side panel
+ */
+function pin() {
+    if (typeof GM_sidePanel === 'undefined') {
+        toast('Pinning needs a Moss with the side panel (Moss 0.2+).', { type: 'error' });
+        return;
+    }
+    panel.prefs.pinned = true;
+    save_prefs(panel.prefs);
+    side_start();
+    panel.side.open().then(function () {
+        toast('Pinned: followMe is in the side panel');
+    }, function (e) {
+        toast(`Pinned. ${e.message}`, { type: 'error', timeout: 9000 });
+    });
+}
+
+/*
+ * unpin() — back into the page
+ */
+function unpin() {
+    panel.prefs.pinned = false;
+    panel.prefs.open = true;
+    save_prefs(panel.prefs);
+    if (panel.side !== null) {
+        const side = panel.side;
+        panel.side = null;
+        side.close().catch(function () {}).then(function () {
+            return side.stop();
+        }).catch(function () {});
+    }
+    panel.side_shown = false;
+    panel_render();
+    tab_render();
+}
+
 // ---------- editing the open activity ----------
 
 /*
@@ -2485,7 +3203,54 @@ function commit(change, rerender) {
 function edit_step(index, change, rerender) {
     commit(function (activity) {
         change(activity.steps[index]);
+        mark_unsaved(activity, activity.steps[index].id);
     }, rerender);
+}
+
+/*
+ * edit_settings(change, rerender) — commit a change to the activity's own settings
+ */
+function edit_settings(change, rerender) {
+    commit(function (activity) {
+        change(activity);
+        mark_unsaved(activity, '');
+    }, rerender);
+}
+
+/*
+ * mark_unsaved(activity, id) — note that a step ('' = the settings) changed since Save
+ */
+function mark_unsaved(activity, id) {
+    if (activity.unsaved.indexOf(id) < 0) {
+        activity.unsaved.push(id);
+    }
+}
+
+/*
+ * save_now() — Save: everything in the open activity counts as saved, and the gist is
+ *   updated
+ */
+function save_now() {
+    commit(function (activity) {
+        activity.unsaved = [];
+    }, true);
+    if (!gist_ready()) {
+        toast('Saved. (Connect a GitHub gist under ☁ Gist to keep a backup there too.)');
+        return;
+    }
+    toast('Saved — updating the gist…');
+    gist_sync().then(function () {
+        toast('Saved and synced to the gist');
+    }, function (e) {
+        toast(`Saved here, but the gist sync failed: ${e.message}`, { type: 'error' });
+    });
+}
+
+/*
+ * steps_changed() — a step was added or removed: keep it, and update the gist
+ */
+function steps_changed() {
+    gist_sync_soon();
 }
 
 /*
@@ -2527,7 +3292,7 @@ async function with_panel_hidden(task) {
     } finally {
         panel.hidden = false;
         if (panel.layer !== null) {
-            panel.layer.host.style.display = '';
+            panel.layer.host.style.display = panel.side_shown ? 'none' : '';
         }
     }
 }
@@ -2552,8 +3317,49 @@ async function add_point_step(action) {
     commit(function (activity) {
         activity.steps.splice(at, 0, step);
     }, false);
+    steps_changed();
     panel.open_step = at;
     panel_render();
+    if (step.action === 'type') {
+        focus_type_text();
+    }
+}
+
+/*
+ * add_type_step() — add "type text": into the field the step before clicks, or, when
+ *   there is no click before it, into a field you mark on the page
+ */
+function add_type_step() {
+    const at = panel.open_step >= 0 ? panel.open_step + 1 : panel.activity.steps.length;
+    const before = at > 0 ? panel.activity.steps[at - 1] : null;
+    if (before === null || before.action !== 'click') {
+        add_point_step('type');
+        return;
+    }
+    const step = step_create(0, 0, view_now());
+    step.action = 'type';
+    step.type_into = 'focused';
+    step.pause_ms = 500;
+    commit(function (activity) {
+        activity.steps.splice(at, 0, step);
+    }, false);
+    steps_changed();
+    panel.open_step = at;
+    panel_render();
+    focus_type_text();
+}
+
+/*
+ * focus_type_text() — put the cursor in the open step's "Text to type" box
+ */
+function focus_type_text() {
+    if (panel.layer === null) {
+        return;
+    }
+    const box = panel.layer.root.querySelector('.step-body input[placeholder="Text to type"]');
+    if (box !== null) {
+        box.focus();
+    }
 }
 
 /*
@@ -2566,6 +3372,7 @@ function add_other_step(action) {
     commit(function (activity) {
         activity.steps.splice(at, 0, step);
     }, false);
+    steps_changed();
     panel.open_step = at;
     panel_render();
 }
@@ -2742,12 +3549,28 @@ function render_action_fields(index) {
         };
     };
     const out = [];
+    const check = function (field, label) {
+        return h('label', { class: 'row' }, h('input', {
+            type: 'checkbox', checked: step[field],
+            on_change: function (event) { set(field, true)(event.target.checked); },
+        }), label);
+    };
     if (step.action === 'type') {
         out.push(h('div', { class: 'row' }, text_field(step.text, set('text', true), { placeholder: 'Text to type', class: 'grow' })),
-            h('label', { class: 'row' }, h('input', {
-                type: 'checkbox', checked: step.clear_first,
-                on_change: function (event) { set('clear_first', false)(event.target.checked); },
-            }), 'Empty the field first'));
+            h('div', { class: 'row' }, 'Into', select_field(step.type_into, TYPE_INTO, function (v) {
+                const view = view_now();
+                edit_step(index, function (s) {
+                    s.type_into = v;
+                    if (v === 'point' && s.x === 0 && s.y === 0) {
+                        s.x = Math.round(view.w / 2);
+                        s.y = Math.round(view.h / 2);
+                    }
+                }, true);
+            })),
+            h('div', { class: 'row' }, 'Type it', select_field(step.type_mode, TYPE_MODES, set('type_mode', true)),
+                step.type_mode === 'keys' ? ['every', seconds_field(step.key_delay_ms, set('key_delay_ms', false)), 's'] : null),
+            check('clear_first', 'Empty the field first'),
+            check('enter_after', 'Press Enter after typing (submits a search box)'));
     } else if (step.action === 'key') {
         out.push(h('div', { class: 'row' }, 'Key', text_field(step.key, set('key', true), { placeholder: 'Enter, Escape, Tab, a…' })));
     } else if (step.action === 'scroll') {
@@ -2825,7 +3648,7 @@ function render_step_body(index) {
         action_names[key] = ACTIONS[key].label;
     }
     const sections = [];
-    if (ACTIONS[step.action].point) {
+    if (step_has_point(step)) {
         const now = step_point(step, view_now());
         const hit = hit_at(now.x, now.y);
         sections.push(h('div', { class: 'section' },
@@ -2897,11 +3720,26 @@ function render_step_body(index) {
             class: 'btn small danger',
             on_click: function () {
                 commit(function (activity) { activity.steps.splice(index, 1); }, false);
+                steps_changed();
                 panel.open_step = -1;
                 panel_render();
             },
-        }, 'Delete step')));
+        }, 'Delete step'),
+        save_button(step.id)));
     return h('div', { class: 'step-body' }, sections);
+}
+
+/*
+ * save_button(id) -> "💾 Save" when that step ('' = the settings) has unsaved changes,
+ *   else a quiet "✓ Saved"
+ */
+function save_button(id) {
+    const dirty = panel.activity.unsaved.indexOf(id) >= 0;
+    return h('button', {
+        class: dirty ? 'btn small primary' : 'btn small ghost',
+        title: gist_ready() ? 'Save, and update the GitHub gist' : 'Save',
+        on_click: save_now,
+    }, dirty ? '💾 Save' : '✓ Saved');
 }
 
 /*
@@ -2919,9 +3757,10 @@ function render_step(index) {
             },
         },
         h('span', { class: 'badge' }, String(index + 1)),
-        ACTIONS[step.action].point ? mini_screen(step, true) : null,
+        step_has_point(step) ? mini_screen(step, true) : null,
         h('div', { class: 'what' },
-            h('div', { class: 'title' }, step_title(step, index)),
+            h('div', { class: 'title' }, step_title(step, index),
+                panel.activity.unsaved.indexOf(step.id) >= 0 ? h('span', { class: 'unsaved', title: 'Changed since the last Save' }, 'unsaved') : null),
             h('div', { class: 'desc' }, step_summary(step))),
         h('input', {
             type: 'checkbox', checked: step.enabled, title: 'Play this step',
@@ -2989,35 +3828,39 @@ function render_detail() {
         h('div', { class: 'row' },
             h('button', { class: 'btn ghost small', on_click: close_activity }, '←'),
             text_field(a.name, function (v) {
-                commit(function (act) { act.name = v.trim() || 'Untitled'; }, false);
+                edit_settings(function (act) { act.name = v.trim() || 'Untitled'; }, false);
             }, { class: 'name grow', 'aria-label': 'Activity name' })),
         h('div', { class: 'row' },
             h('button', { class: 'btn primary', on_click: function () { play_activity(a, 0); } }, '▶ Play'),
             h('button', { class: 'btn', on_click: stop_run }, '■ Stop'),
+            a.unsaved.length > 0
+                ? h('button', { class: 'btn primary', title: 'Save every change, and update the gist', on_click: save_now }, '💾 Save')
+                : h('span', { class: 'muted' }, '✓ Saved'),
             h('span', { class: 'grow' }),
             'Loops', number_field(a.loops, function (n) {
-                commit(function (act) { act.loops = clamp(Math.round(n), 0, 100000); }, true);
+                edit_settings(function (act) { act.loops = clamp(Math.round(n), 0, 100000); }, true);
             }, { min: '0', title: '0 = until stopped' }),
             'every', seconds_field(a.loop_pause_ms, function (ms) {
-                commit(function (act) { act.loop_pause_ms = ms; }, false);
+                edit_settings(function (act) { act.loop_pause_ms = ms; }, false);
             }), 's'),
         h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Runs on'), text_field(a.pages, function (v) {
-            commit(function (act) { act.pages = v.trim() || `${act.site}/*`; }, false);
+            edit_settings(function (act) { act.pages = v.trim() || `${act.site}/*`; }, false);
         }, { class: 'grow', title: 'Pages this activity is for: a * pattern or /regex/' })),
         render_device_row(a),
         h('div', { class: 'row' },
             h('label', { class: 'row' }, h('input', {
                 type: 'checkbox', checked: a.need_online,
                 on_change: function (event) {
-                    commit(function (act) { act.need_online = event.target.checked; }, true);
+                    edit_settings(function (act) { act.need_online = event.target.checked; }, true);
                 },
             }), 'Only play with internet'),
             a.need_online ? select_field(a.offline, { wait: 'if it\'s off, wait for it', stop: 'if it\'s off, stop' }, function (v) {
-                commit(function (act) { act.offline = v; }, false);
+                edit_settings(function (act) { act.offline = v; }, false);
             }) : null),
         h('div', { class: 'steps' }, steps),
         h('div', { class: 'row' },
             h('button', { class: 'btn primary', on_click: function () { add_point_step('click'); } }, '＋ Add click (mark on page)'),
+            h('button', { class: 'btn', title: 'Type into the field the click before this step focuses', on_click: add_type_step }, '⌨ Type text'),
             select_field('', {
                 '': '＋ Other step…', read: 'Read text (mark on page)', side: 'Run on another site (split view)', wait: 'Only wait', key: 'Press a key',
             }, function (v) {
@@ -3027,6 +3870,19 @@ function render_detail() {
                     add_other_step(v);
                 }
             })),
+        h('div', { class: 'row', style: { marginTop: '12px' } },
+            h('span', { class: 'grow' }),
+            h('button', {
+                class: 'btn small danger',
+                on_click: function () {
+                    if (!confirm(`Delete the activity "${a.name}"?${gist_ready() ? ' It is removed from the gist too (the gist\'s history still has it).' : ''}`)) {
+                        return;
+                    }
+                    remove_activity(a.id);
+                    gist_sync_soon();
+                    close_activity();
+                },
+            }, 'Delete activity')),
     ];
 }
 
@@ -3039,10 +3895,10 @@ function render_device_row(a) {
     return h('div', { class: 'row' },
         h('span', { class: 'muted' }, 'View as'),
         select_field(a.device, DEVICES, function (v) {
-            commit(function (act) { act.device = v; }, true);
+            edit_settings(function (act) { act.device = v; }, true);
         }),
         a.device === 'desktop' ? null : select_field(a.orientation, ORIENTATIONS, function (v) {
-            commit(function (act) { act.orientation = v; }, true);
+            edit_settings(function (act) { act.orientation = v; }, true);
         }),
         same ? null : h('button', {
             class: 'btn small', title: 'Show this tab that way now, to mark points on that layout (the page reloads)',
@@ -3094,6 +3950,7 @@ function render_transfer() {
                 on_click: function () {
                     try {
                         toast(`Imported ${import_activities(area.value)} activities`);
+                        gist_sync_soon();
                         panel.view = 'list';
                         panel_render();
                     } catch (e) {
@@ -3105,15 +3962,176 @@ function render_transfer() {
 }
 
 /*
+ * ago(ms) -> "just now", "5 min ago", "3 h ago"
+ */
+function ago(ms) {
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 45) {
+        return 'just now';
+    }
+    if (s < 3600) {
+        return `${Math.round(s / 60)} min ago`;
+    }
+    if (s < 86400) {
+        return `${Math.round(s / 3600)} h ago`;
+    }
+    return new Date(ms).toLocaleDateString();
+}
+
+/*
+ * render_cloud() — the gist button in the footer: off, synced when, or failing
+ */
+function render_cloud() {
+    if (panel.cloud === null) {
+        return;
+    }
+    const conf = gist_conf();
+    let text = '☁ Gist';
+    let cls = 'btn small';
+    if (gist_ready()) {
+        if (conf.error !== '') {
+            text = '☁ Sync failed';
+            cls += ' danger';
+        } else {
+            text = conf.last_sync > 0 ? `☁ Synced ${ago(conf.last_sync)}` : '☁ Syncing…';
+        }
+    }
+    panel.cloud.className = cls;
+    panel.cloud.textContent = text;
+    panel.cloud.title = conf.error !== '' ? conf.error : 'Back up and sync your activities in a GitHub gist';
+}
+
+/*
+ * download(name, text) — save text as a file
+ */
+function download(name, text) {
+    const link = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/json' })), download: name });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(function () {
+        URL.revokeObjectURL(link.href);
+    }, 10000);
+}
+
+/*
+ * render_sync() -> the gist settings: connect, status, sync now, history, backup
+ */
+function render_sync() {
+    const conf = gist_conf();
+    const back = h('button', { class: 'btn ghost small', on_click: function () { panel.view = panel.activity === null ? 'list' : 'detail'; panel_render(); } }, '←');
+    const status = h('div', { class: conf.error !== '' ? 'note bad' : 'note' });
+    if (!gist_ready()) {
+        status.textContent = 'Not connected.';
+    } else if (conf.error !== '') {
+        status.textContent = `Last sync failed: ${conf.error}`;
+    } else {
+        status.textContent = conf.last_sync > 0 ? `Synced ${ago(conf.last_sync)}.` : 'Not synced yet.';
+    }
+    const backup = h('button', {
+        class: 'btn small',
+        on_click: function () {
+            download(`followme-backup-${new Date().toISOString().slice(0, 10)}.json`, backup_text());
+        },
+    }, '⬇ Download a backup file');
+    if (!gist_ready()) {
+        const token = h('input', { type: 'password', placeholder: 'GitHub token (ghp_… or github_pat_…)', class: 'grow', autocomplete: 'off' });
+        const id = h('input', { type: 'text', placeholder: 'Gist id or URL (empty = find or make one)', class: 'grow', spellcheck: 'false' });
+        const connect = h('button', {
+            class: 'btn primary',
+            on_click: function () {
+                if (token.value.trim() === '') {
+                    toast('Paste a token first.', { type: 'error' });
+                    return;
+                }
+                connect.disabled = true;
+                connect.textContent = 'Connecting…';
+                gist_connect(token.value.trim(), id.value).then(function (c) {
+                    toast('Connected — your activities are in the gist');
+                    panel_render();
+                    return c;
+                }, function (e) {
+                    connect.disabled = false;
+                    connect.textContent = 'Connect';
+                    toast(e.message, { type: 'error' });
+                });
+            },
+        }, 'Connect');
+        return [
+            h('div', { class: 'row' }, back, h('b', null, '☁ GitHub gist')),
+            h('div', { class: 'muted' }, 'Keeps every activity of every site in one private gist: one readable file per activity. ',
+                'It is updated when you press Save, add a step, or delete or import an activity, and read when followMe starts. ',
+                'The gist keeps every earlier version (Revisions), so it is also your backup history.'),
+            h('ol', { class: 'muted howto' },
+                h('li', null, 'On GitHub: Settings → Developer settings → Personal access tokens → ',
+                    h('a', { href: 'https://github.com/settings/tokens/new?scopes=gist&description=followMe', target: '_blank', rel: 'noopener' }, 'new token (classic)'),
+                    ' with only the ', h('b', null, 'gist'), ' scope.'),
+                h('li', null, 'Paste it here. Leave the gist empty: followMe finds your followMe gist, or makes a new private one.'),
+                h('li', null, 'On another computer, paste the same token to get the same activities.')),
+            h('div', { class: 'row' }, token),
+            h('div', { class: 'row' }, id),
+            h('div', { class: 'row' }, connect),
+            h('div', { class: 'muted' }, 'The token is kept in Moss\'s storage for this script on this computer.'),
+            h('div', { class: 'row' }, backup),
+        ];
+    }
+    return [
+        h('div', { class: 'row' }, back, h('b', null, '☁ GitHub gist')),
+        status,
+        h('div', { class: 'row' },
+            h('button', {
+                class: 'btn primary',
+                on_click: function () {
+                    status.textContent = 'Syncing…';
+                    gist_sync().then(function (r) {
+                        toast(`Synced: ${r.pulled} taken from the gist, ${r.pushed} written to it`);
+                        panel_render();
+                    }, function (e) {
+                        toast(e.message, { type: 'error' });
+                        panel_render();
+                    });
+                },
+            }, '⟳ Sync now'),
+            conf.url ? h('a', { class: 'btn', href: conf.url, target: '_blank', rel: 'noopener' }, 'Open the gist') : null,
+            conf.url ? h('a', { class: 'btn', href: `${conf.url}/revisions`, target: '_blank', rel: 'noopener', title: 'Every earlier version: your backups' }, 'History') : null),
+        h('label', { class: 'row' }, h('input', {
+            type: 'checkbox', checked: conf.auto,
+            on_change: function (event) {
+                gist_conf_set({ auto: event.target.checked });
+            },
+        }), 'Sync automatically (Save, add a step, start-up)'),
+        h('div', { class: 'muted' }, `Gist ${conf.gist_id}`),
+        h('div', { class: 'row' }, backup,
+            h('button', {
+                class: 'btn small danger',
+                on_click: function () {
+                    if (confirm('Stop syncing with this gist? The gist stays on GitHub; the activities stay here.')) {
+                        gist_disconnect();
+                        panel_render();
+                    }
+                },
+            }, 'Disconnect')),
+    ];
+}
+
+/*
  * panel_render() — draw the panel for the current view
  */
 function panel_render() {
-    if (!panel.prefs.open) {
+    if (!panel_visible()) {
         return;
     }
     if (panel.layer === null) {
         panel.layer = layer_create('panel', PANEL_CSS);
+        if (panel.side !== null) {
+            panel.side.set_root(panel.layer.root);
+        }
     }
+    // In the side panel the copy is what shows; the page keeps it out of sight.
+    panel.layer.host.style.display = panel.side_shown || panel.hidden ? 'none' : '';
+    // Redrawing replaces the body: keep where it was scrolled to (same view only).
+    const old_body = panel.layer.root.querySelector('.body');
+    const keep_scroll = old_body !== null && old_body.dataset.view === panel.view ? old_body.scrollTop : 0;
     if (panel.view === 'detail' && panel.activity !== null) {
         panel.activity = load_activity(panel.activity.id);
         if (panel.activity === null) {
@@ -3125,6 +4143,8 @@ function panel_render() {
         body = render_detail();
     } else if (panel.view === 'transfer') {
         body = render_transfer();
+    } else if (panel.view === 'sync') {
+        body = render_sync();
     } else {
         body = render_list();
     }
@@ -3136,24 +4156,30 @@ function panel_render() {
             check_online(true).then(render_net);
         },
     });
+    panel.cloud = h('button', { class: 'btn small', on_click: function () { panel.view = 'sync'; panel_render(); } });
     panel.status = h('div', { class: 'status', hidden: true }, h('span', { class: 'text' }), h('button', { class: 'btn small', on_click: stop_run }, '■ Stop'));
     const side = panel.prefs.side;
-    const root = h('div', { class: `fm panel ${side}` },
+    const root = h('div', { class: `fm panel ${side}${panel.side_shown ? ' in-side' : ''}` },
         h('div', { class: 'head' },
             h('span', { class: 'logo' }, 'follow', h('b', null, 'Me')),
             h('span', { class: 'site grow' }, location.hostname),
             panel.net,
-            h('button', {
-                class: 'btn ghost small', title: 'Move to the other side',
-                on_click: function () {
-                    panel.prefs.side = side === 'right' ? 'left' : 'right';
-                    save_prefs(panel.prefs);
-                    panel_render();
-                    tab_render();
-                },
-            }, '⇆'),
-            h('button', { class: 'btn ghost small', title: 'Close (Alt+Shift+P)', on_click: panel_close }, '✕')),
-        h('div', { class: 'body' }, body),
+            panel.side_shown
+                ? h('button', { class: 'btn small', title: 'Put the panel back on the page', on_click: unpin }, 'Unpin')
+                : [
+                    h('button', { class: 'btn ghost small', title: 'Pin to Chrome\'s side panel: next to the page instead of over it, full size in phone view', on_click: pin }, '📌'),
+                    h('button', {
+                        class: 'btn ghost small', title: 'Move to the other side',
+                        on_click: function () {
+                            panel.prefs.side = side === 'right' ? 'left' : 'right';
+                            save_prefs(panel.prefs);
+                            panel_render();
+                            tab_render();
+                        },
+                    }, '⇆'),
+                    h('button', { class: 'btn ghost small', title: 'Close (Alt+Shift+P)', on_click: panel_close }, '✕'),
+                ]),
+        h('div', { class: 'body', 'data-view': panel.view }, body),
         panel.status,
         h('div', { class: 'foot' },
             h('label', { class: 'row' }, h('input', {
@@ -3165,9 +4191,12 @@ function panel_render() {
                 },
             }), 'Show marks'),
             h('span', { class: 'grow' }),
+            panel.cloud,
             h('button', { class: 'btn small', on_click: function () { panel.view = 'transfer'; panel_render(); } }, 'Export / import')));
     panel.layer.root.replaceChildren(h('style', null, BASE_CSS + PANEL_CSS), root);
+    root.querySelector('.body').scrollTop = keep_scroll;
     render_net();
+    render_cloud();
     show_marks();
     if (current_run !== null) {
         render_status(current_run);
@@ -3192,7 +4221,7 @@ function render_status(run) {
         panel.rows[i].classList.toggle('current', same && playing && i === run.step);
     }
     if (playing) {
-        if (!same || !panel.prefs.open) {
+        if (!same || !panel_visible()) {
             marks_set(run.activity, -1, null);
         }
         marks_active(run.step);
@@ -3211,7 +4240,7 @@ let tab_layer = null;
  * tab_render() — the small tab on the window's edge that opens the panel
  */
 function tab_render() {
-    if (panel.prefs.open) {
+    if (panel_visible()) {
         if (tab_layer !== null) {
             layer_remove(tab_layer);
             tab_layer = null;
@@ -3262,14 +4291,16 @@ async function main() {
     panel.prefs = load_prefs();
     on_run_change(render_status);
     on_online_change(render_net);
+    on_gist_change(render_cloud);
     watch_network();
+    watch_focus();
     check_online(true);
     await device_now();
     document.addEventListener('keydown', on_key, true);
     GM_registerMenuCommand('followMe: open / close the panel', panel_toggle);
     GM_registerMenuCommand('followMe: stop playing', stop_run);
     GM_addValueChangeListener(ACTIVITIES_KEY, function (key, old_value, new_value, remote) {
-        if (remote && panel.prefs.open) {
+        if (remote && panel_visible()) {
             panel_render(); // changed in another tab
         }
     });
@@ -3278,10 +4309,18 @@ async function main() {
         panel.activity = last;
         panel.view = 'detail';
     }
+    if (panel.prefs.pinned) {
+        side_start();
+    }
     tab_render();
     if (panel.prefs.open) {
         panel_render();
     }
+    gist_sync_on_start().then(function (r) {
+        if (r !== null && r.pulled > 0 && panel_visible()) {
+            panel_render(); // the gist had newer activities
+        }
+    });
     let ran = await resume_saved_run();
     if (ran === null) {
         ran = await start_job();

@@ -11,7 +11,7 @@ import vm from 'node:vm';
 import { ORDER, bundle } from '../tools/build.mjs';
 
 const ROOT = new URL('../', import.meta.url);
-const CORE = ['src/core/util.js', 'src/core/steps.js', 'src/core/store.js', 'src/core/net.js', 'src/core/device.js', 'src/core/checks.js',
+const CORE = ['src/core/util.js', 'src/core/steps.js', 'src/core/store.js', 'src/core/gist.js', 'src/core/net.js', 'src/core/device.js', 'src/core/checks.js',
     'src/core/clicker.js', 'src/core/runner.js'];
 
 /*
@@ -40,6 +40,13 @@ function page_create(url, shared_values) {
             ctx.toasts.push(text);
         },
         GM_xmlhttpRequest: function (d) {
+            if (ctx.fake_github !== undefined && d.url.startsWith('https://api.github.com')) {
+                setTimeout(function () {
+                    const answer = ctx.fake_github(d.method, d.url, d.data === undefined ? null : JSON.parse(d.data));
+                    d.onload({ status: answer[0], responseText: JSON.stringify(answer[1]) });
+                }, 5);
+                return;
+            }
             setTimeout(function () {
                 if (ctx.internet) {
                     d.onload({ status: 204 });
@@ -94,7 +101,8 @@ function page_create(url, shared_values) {
     // Expose the script's top-level bindings, and record actions instead of clicking.
     code += 'globalThis.fm = { activity_create, step_create, check_create, step_point, step_title, describe_action, describe_check, '
         + 'activity_runs_on, activity_duration, save_activity, load_activity, activities_for, export_activities, import_activities, '
-        + 'run_check, start_run, stop_run, resume_saved_run, start_job, load_run_state, glob_test, format_ms, fill_vars, activity_fix, check_online };\n'
+        + 'run_check, start_run, stop_run, resume_saved_run, start_job, load_run_state, glob_test, format_ms, fill_vars, activity_fix, check_online, '
+        + 'gist_connect, gist_sync, remove_activity, load_all };\n'
         + 'globalThis.done = [];\n'
         + 'globalThis.typed = [];\n'
         + 'globalThis.reads = {};\n'
@@ -379,6 +387,92 @@ test('other site: a step plays an activity beside this page and brings back what
     ]);
     assert.deepEqual([...main.typed], ['Offer $12']);
     assert.deepEqual(JSON.parse(main.values.fm_jobs), {}, 'the job is cleaned up');
+});
+
+/*
+ * fake_gist() -> { files, handle(method, url, body) -> [status, json] }: a GitHub gist API
+ *   with one gist, kept in memory
+ */
+function fake_gist() {
+    const g = { id: 'abc123def456abc123de', files: {}, patches: 0 };
+    g.handle = function (method, url, body) {
+        if (method === 'GET' && url.endsWith('/gists?per_page=100')) {
+            return [200, []];
+        }
+        if (method === 'POST' && url.endsWith('/gists')) {
+            for (const name of Object.keys(body.files)) {
+                g.files[name] = body.files[name].content;
+            }
+            return [201, { id: g.id }];
+        }
+        if (!url.endsWith(`/gists/${g.id}`)) {
+            return [404, { message: 'Not Found' }];
+        }
+        if (method === 'PATCH') {
+            g.patches++;
+            for (const name of Object.keys(body.files)) {
+                if (body.files[name] === null) {
+                    delete g.files[name];
+                } else {
+                    g.files[name] = body.files[name].content;
+                }
+            }
+        }
+        const files = {};
+        for (const name of Object.keys(g.files)) {
+            files[name] = { filename: name, content: g.files[name], truncated: false };
+        }
+        return [200, { id: g.id, html_url: `https://gist.github.com/${g.id}`, files: files }];
+    };
+    return g;
+}
+
+test('gist: two computers share activities through one gist, deletions included', async function () {
+    const gist = fake_gist();
+    const one = page_create('https://shop.test/');
+    one.fake_github = gist.handle;
+    const a = one.fm.activity_create('Checkout flow', 'https://shop.test/cart');
+    a.steps.push(quick_step(one, 'pay'));
+    one.fm.save_activity(a);
+    await one.fm.gist_connect('tok', '');
+    const names = Object.keys(gist.files).sort();
+    assert.equal(names.length, 2);
+    assert.equal(names[0], '_followme.json');
+    assert.match(names[1], /^shop\.test--checkout-flow--.+\.json$/, 'one readable file per activity');
+    assert.ok(!('unsaved' in JSON.parse(gist.files[names[1]])), 'local-only fields stay here');
+
+    // Another computer: same token, finds the same gist by id, gets the activity.
+    const two = page_create('https://shop.test/');
+    two.fake_github = gist.handle;
+    await two.fm.gist_connect('tok', `https://gist.github.com/someone/${gist.id}`);
+    assert.equal(Object.keys(two.fm.load_all()).length, 1);
+    assert.equal(two.fm.load_all()[a.id].name, 'Checkout flow');
+
+    // Renamed there: the file is renamed in the gist, and the first computer takes it.
+    await new Promise(function (r) { setTimeout(r, 5); });
+    const copy = two.fm.load_all()[a.id];
+    copy.name = 'Pay now';
+    two.fm.save_activity(copy);
+    await two.fm.gist_sync();
+    let renamed = false;
+    for (const name of Object.keys(gist.files)) {
+        renamed = renamed || name.startsWith('shop.test--pay-now--');
+    }
+    assert.ok(renamed, 'the file follows the new name');
+    assert.equal(Object.keys(gist.files).length, 2, 'the old file name is gone');
+    await one.fm.gist_sync();
+    assert.equal(one.fm.load_all()[a.id].name, 'Pay now');
+
+    // Deleted on the first computer: gone from the gist and, after a sync, from the second.
+    one.fm.remove_activity(a.id);
+    await one.fm.gist_sync();
+    assert.deepEqual(Object.keys(gist.files), ['_followme.json']);
+    await two.fm.gist_sync();
+    assert.equal(Object.keys(two.fm.load_all()).length, 0);
+
+    const patches = gist.patches;
+    await two.fm.gist_sync();
+    assert.equal(gist.patches, patches, 'nothing changed, nothing written');
 });
 
 test('build: followMe.moss is the header plus every source file, and up to date', function () {

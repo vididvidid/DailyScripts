@@ -18,6 +18,7 @@
  *     tab_y: number;          where the edge tab sits, 0..1 of the window height
  *     last_activity: string;  activity open in the panel, reopened after a reload
  *     online_url: string;     page asked to tell whether the internet is on
+ *     pinned: boolean;        the panel lives in Chrome's side panel
  * }
  *
  * struct saved_run {
@@ -43,7 +44,7 @@ const RESUME_WINDOW_MS = 120000;   // a saved run older than this is not resumed
  * prefs_default() -> struct prefs
  */
 function prefs_default() {
-    return { open: false, side: 'right', show_marks: true, tab_y: 0.4, last_activity: '', online_url: ONLINE_URL };
+    return { open: false, side: 'right', show_marks: true, tab_y: 0.4, last_activity: '', online_url: ONLINE_URL, pinned: false };
 }
 
 /*
@@ -118,6 +119,7 @@ function remove_activity(id) {
     const all = load_all();
     delete all[id];
     GM_setValue(ACTIVITIES_KEY, all);
+    mark_deleted(id);
 }
 
 /*

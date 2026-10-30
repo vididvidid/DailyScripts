@@ -41,6 +41,27 @@ the window. Click it, or press **Alt+Shift+P**, to open the side panel.
 | **Before it, wait until** / **After it, wait until** | **Page fully loaded**, **URL changed**, **URL matches** `*glob*` or `/regex/`, **Internet is on**, **Wait a fixed time**. Each has a time limit and either *stop* or *go on* when that runs out |
 | **Then pause** | the break before the next step, plus an optional random ± so the timing isn't robotic |
 
+### Typing (for example, a search on google.com)
+
+1. **＋ Add click (mark on page)** and click the search bar. That is **Click 1**, and it
+   puts the cursor in the box.
+2. **⌨ Type text**. Because the step before is a click, the new step types into **the
+   field that has the focus**, so there's nothing to mark. Write the text in **Text to
+   type**.
+3. Tick **Press Enter after typing** to run the search. Add an **After it, wait until →
+   URL changed** (or **Page fully loaded**) before the next click on the results.
+
+A Type text step can also have its own point instead (**Into → the field at a point**).
+It then clicks that field itself, so no separate click is needed. Other options:
+- **key by key** (default): keydown, input and keyup for each character, with a short
+  random gap, so search boxes show their suggestions.
+- **all at once:** sets the whole text in one go.
+- **Empty the field first.**
+- `{name}` puts in a value read earlier.
+
+Enter that the page doesn't handle itself submits the field's form. Google's search box
+is a `<textarea>`, and this covers it.
+
 4. **▶ Play** runs it, **■ Stop** or **Esc** stops it. **Loops** repeats the whole activity
    (0 = until stopped), with a pause between loops. **▶ Test this step** does only that
    step's action, and **▶ Play from here** starts at that step.
@@ -89,7 +110,8 @@ not a squeezed desktop page.
 - Chrome shows a bar saying Moss "started debugging this browser" while a tab is
   emulated. Clicking **Cancel** on it ends the emulation, and a run that needs it stops
   with a message. To go back, pick **Desktop** and **Show it now**.
-- At phone width the panel turns into a sheet at the bottom of the page.
+- At phone width the panel turns into a sheet at the bottom of the page. Better: pin it
+  to the side (below), where it keeps its full size.
 
 ### Reading values, and other sites in split view
 
@@ -124,11 +146,43 @@ tab just before every action. On the next page it carries on with that step's "a
 checks, and **URL changed** is then already true. This is kept per tab and expires
 after two minutes.
 
+### Pin it to the side
+
+**📌** in the panel's header moves followMe into Chrome's **side panel** (Moss's side
+panel). There it sits next to the page instead of over it. It also stays full size when
+the tab is shown as a phone or tablet, because device emulation only squeezes the page.
+It follows the tab you're on and stays pinned on every page until you click **Unpin**.
+
+Chrome opens the side panel only from a click on the browser itself, so 📌 may ask you
+to open it once: use the Moss toolbar button → **Side panel**, or right-click the page →
+**Moss side panel**. After that, followMe appears there by itself.
+
+### Saving, backup and gist sync
+
+Every change is kept the moment you make it, so nothing is lost if you forget to save.
+A step you changed shows **unsaved** until you press **💾 Save** (on the step, or at the
+top of the activity). Save marks it saved and updates the gist.
+
+**☁ Gist** (in the footer) keeps **all activities of all sites** in one private GitHub
+gist, with one readable file per activity:
+
+1. Make a [token (classic) with only the `gist` scope](https://github.com/settings/tokens/new?scopes=gist&description=followMe)
+   and paste it there. Leave the gist id empty: followMe finds your followMe gist, or
+   makes a new private one.
+2. The gist is updated when you press **Save**, add a step, delete an activity, or
+   import. It is read when followMe starts on a page (at most once a minute). Per
+   activity, the newer copy wins, and a deletion wins over anything older.
+3. The gist's **History** (its revisions) keeps every earlier version: that's your
+   backup. **⬇ Download a backup file** saves everything as one JSON file too.
+4. On another computer, paste the same token to get the same activities.
+
+The token is kept in Moss's storage for this script.
+
 ### Keeping and sharing
 
 Activities are stored in Moss (`GM_setValue`) and listed per site. **Runs on** sets
 which pages an activity is for (default: the whole site). **Export / import** gives
-this site's activities as JSON.
+this site's activities as JSON. **Delete activity** is at the bottom of an activity.
 
 ## How a click works, and its limits
 
@@ -157,6 +211,7 @@ src/header.txt         the Moss header (a .txt, so Moss doesn't list it as a scr
 src/core/util.js       helpers (sleep that a stop wakes, globs, ids)
 src/core/steps.js      activities, steps, checks, and their plain-language descriptions
 src/core/store.js      GM storage, per-tab run state for resuming, other-site job results
+src/core/gist.js       GitHub gist sync and backup (one file per activity, merge, deletions)
 src/core/net.js        is the internet on (navigator.onLine + a probe through GM_xmlhttpRequest)
 src/core/device.js     desktop / mobile / tablet view through Moss's GM_device
 src/core/checks.js     page loaded / URL changed / URL matches / internet on / wait
