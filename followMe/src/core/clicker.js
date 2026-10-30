@@ -497,14 +497,18 @@ function scroll_at(hit, dx, dy) {
 }
 
 /*
- * bring_into_view(step) -> { x, y } of the step's point, scrolling the page first when a
- * 'page' point is off screen
+ * bring_into_view(step) -> struct found for the step's point, scrolling first when it is
+ * off screen (to the element it follows, or a 'page' point's scroll position)
  */
 function bring_into_view(step) {
-    let point = step_point(step, view_now());
-    if (step.place === 'page' && (point.x < 0 || point.y < 0 || point.x >= window.innerWidth || point.y >= window.innerHeight)) {
+    let point = point_of(step);
+    const off = point.x < 0 || point.y < 0 || point.x >= window.innerWidth || point.y >= window.innerHeight;
+    if (off && point.el !== null) {
+        point.el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+        point = point_of(step);
+    } else if (off && step.place === 'page') {
         window.scrollTo({ left: step.scroll_x, top: step.scroll_y, behavior: 'instant' });
-        point = step_point(step, view_now());
+        point = point_of(step);
     }
     return point;
 }

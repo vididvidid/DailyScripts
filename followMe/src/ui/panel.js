@@ -239,14 +239,8 @@ function show_marks() {
  * move_step_to(index, x, y) — a mark was dragged: the step now acts there
  */
 function move_step_to(index, x, y) {
-    const view = view_now();
     edit_step(index, function (step) {
-        step.x = Math.round(x);
-        step.y = Math.round(y);
-        step.scroll_x = Math.round(view.scroll_x);
-        step.scroll_y = Math.round(view.scroll_y);
-        step.view_w = view.w;
-        step.view_h = view.h;
+        set_point(step, x, y);
     }, true);
 }
 
@@ -282,6 +276,7 @@ async function add_point_step(action) {
         return;
     }
     const step = step_create(point.x, point.y, view_now());
+    set_point(step, point.x, point.y);
     if (typeof action === 'string') {
         step.action = action;
     }
@@ -440,7 +435,7 @@ function play_activity(activity, from) {
  */
 function mini_screen(step, tiny) {
     const view = view_now();
-    const p = step_point(step, view);
+    const p = point_of(step);
     const left = clamp(p.x / Math.max(1, view.w), 0, 1) * 100;
     const top = clamp(p.y / Math.max(1, view.h), 0, 1) * 100;
     return h('div', { class: tiny ? 'screen tiny' : 'screen', title: `(${Math.round(p.x)}, ${Math.round(p.y)}) in a ${view.w}×${view.h} window` },
@@ -620,28 +615,25 @@ function render_step_body(index) {
     }
     const sections = [];
     if (step_has_point(step)) {
-        const now = step_point(step, view_now());
+        const now = point_of(step);
         const hit = hit_at(now.x, now.y);
         sections.push(h('div', { class: 'section' },
             h('div', { class: 'label' }, 'Where on the screen'),
             h('div', { class: 'row' }, mini_screen(step, false),
                 h('div', { class: 'grow' },
-                    h('div', { class: 'row' }, 'x', number_field(step.x, function (v) {
-                        edit_step(index, function (s) { s.x = Math.round(v); }, true);
-                    }), 'y', number_field(step.y, function (v) {
-                        edit_step(index, function (s) { s.y = Math.round(v); }, true);
+                    h('div', { class: 'row' }, 'x', number_field(Math.round(now.x), function (v) {
+                        edit_step(index, function (s) { set_point(s, v, now.y); }, true);
+                    }), 'y', number_field(Math.round(now.y), function (v) {
+                        edit_step(index, function (s) { set_point(s, now.x, v); }, true);
                     })),
                     h('button', { class: 'btn small', style: { marginTop: '6px' }, on_click: function () { remark_step(index); } }, '📍 Mark again on the page'))),
             h('div', { class: 'row', style: { marginTop: '6px' } }, 'Keeps', select_field(step.place, PLACES, function (v) {
-                const view = view_now();
                 edit_step(index, function (s) {
                     s.place = v;
-                    s.scroll_x = view.scroll_x;
-                    s.scroll_y = view.scroll_y;
-                    s.view_w = view.w;
-                    s.view_h = view.h;
+                    set_point(s, now.x, now.y); // where it acts now, kept the new way
                 }, true);
             })),
+            step.place === 'element' ? h('div', { class: 'muted', style: { marginTop: '4px' } }, describe_found(step)) : null,
             h('div', { class: 'hits', style: { marginTop: '6px' } }, 'Right now that pixel is ', h('code', null, describe_target(hit === null ? null : hit.el)),
                 h('div', { class: 'muted' }, `Point: ${describe_place(step)}.`))));
     }
@@ -818,6 +810,7 @@ function render_detail() {
             edit_settings(function (act) { act.pages = v.trim() || `${act.site}/*`; }, false);
         }, { class: 'grow', title: 'Pages this activity is for: a * pattern or /regex/' })),
         render_device_row(a),
+        render_points_row(a),
         h('div', { class: 'row' },
             h('label', { class: 'row' }, h('input', {
                 type: 'checkbox', checked: a.need_online,
@@ -854,6 +847,67 @@ function render_detail() {
                     close_activity();
                 },
             }, 'Delete activity')),
+    ];
+}
+
+/*
+ * render_points_row(a) -> tools for all points at once: make them follow their element,
+ *   or move them all by a few pixels
+ */
+function render_points_row(a) {
+    let old = 0;
+    for (const step of a.steps) {
+        if (step_has_point(step) && (step.place !== 'element' || !step.anchor)) {
+            old++;
+        }
+    }
+    const dx = h('input', { type: 'number', value: '0', title: 'pixels right (negative: left)' });
+    const dy = h('input', { type: 'number', value: '0', title: 'pixels down (negative: up)' });
+    return [
+        old === 0 ? null : h('div', { class: 'row note' },
+            h('span', { class: 'grow' }, `${old} point${old === 1 ? '' : 's'} stay on a fixed pixel and break when the layout moves (pinning the side panel, resizing).`),
+            h('button', {
+                class: 'btn small primary',
+                title: 'Do this with the page laid out the way it was when you marked them (e.g. unpinned)',
+                on_click: function () {
+                    let made = 0;
+                    commit(function (act) {
+                        for (const step of act.steps) {
+                            if (!step_has_point(step) || (step.place === 'element' && step.anchor)) {
+                                continue;
+                            }
+                            const p = point_of(step);
+                            step.place = 'element';
+                            set_point(step, p.x, p.y);
+                            if (step.anchor) {
+                                made++;
+                            }
+                            mark_unsaved(act, step.id);
+                        }
+                    }, true);
+                    toast(`${made} point${made === 1 ? '' : 's'} now follow their element. The marks must sit right when you do this.`);
+                },
+            }, 'Make them follow')),
+        h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Move all points'), dx, 'px right,', dy, 'px down',
+            h('button', {
+                class: 'btn small',
+                on_click: function () {
+                    const mx = to_number(dx.value, 0);
+                    const my = to_number(dy.value, 0);
+                    if (mx === 0 && my === 0) {
+                        return;
+                    }
+                    commit(function (act) {
+                        for (const step of act.steps) {
+                            if (step_has_point(step)) {
+                                const p = point_of(step);
+                                set_point(step, p.x + mx, p.y + my);
+                                mark_unsaved(act, step.id);
+                            }
+                        }
+                    }, true);
+                },
+            }, 'Move')),
     ];
 }
 

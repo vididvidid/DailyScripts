@@ -12,7 +12,7 @@ import { ORDER, bundle } from '../tools/build.mjs';
 
 const ROOT = new URL('../', import.meta.url);
 const CORE = ['src/core/util.js', 'src/core/steps.js', 'src/core/store.js', 'src/core/gist.js', 'src/core/net.js', 'src/core/device.js', 'src/core/checks.js',
-    'src/core/clicker.js', 'src/core/runner.js'];
+    'src/core/clicker.js', 'src/core/anchor.js', 'src/core/runner.js'];
 
 /*
  * read(path) -> text of a repo file

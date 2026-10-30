@@ -17,6 +17,7 @@ export const ORDER = [
     'src/core/device.js',
     'src/core/checks.js',
     'src/core/clicker.js',
+    'src/core/anchor.js',
     'src/core/runner.js',
     'src/ui/styles.js',
     'src/ui/dom.js',
