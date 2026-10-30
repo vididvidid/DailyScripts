@@ -2,7 +2,8 @@
 /*
  * Starting followMe on a page: the edge tab, the panel if it was left open, the
  * Alt+Shift+P shortcut, Esc to stop a run, the menu command, keeping the panel in step
- * with other tabs, and carrying on a run that a page load interrupted.
+ * with other tabs, watching the internet connection, carrying on a run that a page
+ * load interrupted, and playing an activity another tab opened this page for.
  */
 
 /*
@@ -26,6 +27,10 @@ function on_key(event) {
 async function main() {
     panel.prefs = load_prefs();
     on_run_change(render_status);
+    on_online_change(render_net);
+    watch_network();
+    check_online(true);
+    await device_now();
     document.addEventListener('keydown', on_key, true);
     GM_registerMenuCommand('followMe: open / close the panel', panel_toggle);
     GM_registerMenuCommand('followMe: stop playing', stop_run);
@@ -34,13 +39,21 @@ async function main() {
             panel_render(); // changed in another tab
         }
     });
+    const last = panel.prefs.last_activity ? load_activity(panel.prefs.last_activity) : null;
+    if (last !== null && activity_runs_on(last, location.href)) {
+        panel.activity = last;
+        panel.view = 'detail';
+    }
     tab_render();
     if (panel.prefs.open) {
         panel_render();
     }
-    const resumed = await resume_saved_run();
-    if (resumed !== null && resumed.error !== '') {
-        toast(resumed.error, { type: 'error' });
+    let ran = await resume_saved_run();
+    if (ran === null) {
+        ran = await start_job();
+    }
+    if (ran !== null && ran.error !== '') {
+        toast(ran.error, { type: 'error' });
     }
 }
 

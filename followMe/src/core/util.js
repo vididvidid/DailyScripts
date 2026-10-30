@@ -120,3 +120,14 @@ function glob_test(pattern, text) {
         return false;
     }
 }
+
+/*
+ * regex_of(pattern) -> RegExp for "/source/flags" or a bare source; throws if invalid
+ */
+function regex_of(pattern) {
+    const re = /^\/(.+)\/([a-z]*)$/.exec(pattern);
+    if (re !== null) {
+        return new RegExp(re[1], re[2].replace('g', ''));
+    }
+    return new RegExp(pattern);
+}

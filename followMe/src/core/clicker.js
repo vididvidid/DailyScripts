@@ -4,6 +4,10 @@
  * found with elementFromPoint (through same-origin iframes too), and it gets the same
  * sequence of pointer, mouse, focus and click events a real click produces.
  *
+ * While the tab is shown as a phone or tablet (device.js) a click is a tap instead:
+ * pointer events of type "touch", touchstart / touchend, then the mouse events and
+ * click a phone's browser makes after a tap.
+ *
  * Limits of a userscript: these events are marked untrusted (event.isTrusted is
  * false), so a page that checks that, or a cross-origin iframe (a payment box, a
  * captcha), cannot be clicked this way.
@@ -108,7 +112,7 @@ function mouse_init(hit, button, buttons, detail) {
         bubbles: true, cancelable: true, composed: true, view: hit.win,
         clientX: hit.x, clientY: hit.y, screenX: hit.x + window.screenX, screenY: hit.y + window.screenY,
         button: button, buttons: buttons, detail: detail,
-        pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: buttons ? 0.5 : 0,
+        pointerId: 1, pointerType: is_touch() ? 'touch' : 'mouse', isPrimary: true, width: 1, height: 1, pressure: buttons ? 0.5 : 0,
     };
 }
 
@@ -118,6 +122,47 @@ function mouse_init(hit, button, buttons, detail) {
 function fire(hit, type, init) {
     const make = type.startsWith('pointer') ? hit.win.PointerEvent : hit.win.MouseEvent;
     hit.el.dispatchEvent(new make(type, init));
+}
+
+/*
+ * fire_touch(hit, type) -> false if the page cancelled the touch event
+ */
+function fire_touch(hit, type) {
+    try {
+        const point = new hit.win.Touch({
+            identifier: 1, target: hit.el, clientX: hit.x, clientY: hit.y, pageX: hit.x + hit.win.scrollX, pageY: hit.y + hit.win.scrollY,
+            screenX: hit.x + window.screenX, screenY: hit.y + window.screenY, radiusX: 4, radiusY: 4, force: 0.5,
+        });
+        const down = type !== 'touchend';
+        return hit.el.dispatchEvent(new hit.win.TouchEvent(type, {
+            bubbles: true, cancelable: true, composed: true, view: hit.win,
+            touches: down ? [point] : [], targetTouches: down ? [point] : [], changedTouches: [point],
+        }));
+    } catch (e) {
+        return true; // no touch support in this browser: the pointer and mouse events still go
+    }
+}
+
+/*
+ * tap_at(hit, detail) — a finger tap: touch first, then the mouse events and click a
+ *   phone's browser sends after it (skipped when the page cancels the touch)
+ */
+function tap_at(hit, detail) {
+    fire(hit, 'pointerover', mouse_init(hit, 0, 0, 0));
+    fire(hit, 'pointerdown', mouse_init(hit, 0, 1, detail));
+    fire_touch(hit, 'touchstart');
+    focus_target(hit.el);
+    fire(hit, 'pointerup', mouse_init(hit, 0, 0, detail));
+    const go_on = fire_touch(hit, 'touchend');
+    fire(hit, 'pointerout', mouse_init(hit, 0, 0, 0));
+    if (!go_on) {
+        return;
+    }
+    fire(hit, 'mouseover', mouse_init(hit, 0, 0, 0));
+    fire(hit, 'mousemove', mouse_init(hit, 0, 0, 0));
+    fire(hit, 'mousedown', mouse_init(hit, 0, 1, detail));
+    fire(hit, 'mouseup', mouse_init(hit, 0, 0, detail));
+    fire(hit, 'click', mouse_init(hit, 0, 0, detail));
 }
 
 /*
@@ -172,6 +217,14 @@ function click_at(hit, kind) {
         release(hit, 2, 1);
         return;
     }
+    if (is_touch()) {
+        tap_at(hit, 1);
+        if (kind === 'double_click') {
+            tap_at(hit, 2);
+            fire(hit, 'dblclick', mouse_init(hit, 0, 0, 2));
+        }
+        return;
+    }
     press(hit, 0);
     release(hit, 0, 1);
     if (kind === 'double_click') {
@@ -185,6 +238,14 @@ function click_at(hit, kind) {
  * long_press_at(run, hit, hold_ms) -> Promise; holds the left button down for hold_ms
  */
 async function long_press_at(run, hit, hold_ms) {
+    if (is_touch()) {
+        fire(hit, 'pointerdown', mouse_init(hit, 0, 1, 1));
+        fire_touch(hit, 'touchstart');
+        await sleep(run, hold_ms, null);
+        fire(hit, 'pointerup', mouse_init(hit, 0, 0, 1));
+        fire_touch(hit, 'touchend');
+        return;
+    }
     press(hit, 0);
     await sleep(run, hold_ms, null);
     release(hit, 0, 1);
@@ -220,6 +281,31 @@ function type_at(hit, text, clear_first) {
         throw new Error(`Nothing to type into at that spot (found ${describe_target(field)}).`);
     }
     set_value(field, clear_first ? text : field.value + text);
+}
+
+const READ_LIMIT = 10000;   // longest text a 'read' step keeps
+
+/*
+ * read_at(hit, pattern) -> the text at the point: a field's value or the words shown,
+ *   cut down to the first group (or the whole match) of pattern when one is given
+ */
+function read_at(hit, pattern) {
+    const el = hit.el;
+    let text = '';
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
+        text = el.value;
+    } else {
+        text = el.innerText || el.textContent || el.getAttribute('aria-label') || el.alt || '';
+    }
+    text = text.replace(/\s+/g, ' ').trim().slice(0, READ_LIMIT);
+    if (pattern) {
+        const m = regex_of(pattern).exec(text);
+        if (m === null) {
+            throw new Error(`The text there ("${text.length > 60 ? `${text.slice(0, 60)}…` : text}") doesn't match ${pattern}.`);
+        }
+        text = m[1] !== undefined ? m[1] : m[0];
+    }
+    return text;
 }
 
 const KEY_CODES = { Enter: 13, Escape: 27, Tab: 9, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, ' ': 32 };
@@ -274,30 +360,35 @@ function bring_into_view(step) {
 }
 
 /*
- * do_action(run, step) -> Promise; performs the step's action once
+ * do_action(run, step) -> Promise of the text read by a 'read' step, else undefined;
+ *   performs the step's action once ('side' steps are the runner's)
  */
 async function do_action(run, step) {
-    if (step.action === 'wait') {
-        return;
+    if (step.action === 'wait' || step.action === 'side') {
+        return undefined;
     }
     if (step.action === 'key') {
         press_key(step.key);
-        return;
+        return undefined;
     }
     const point = bring_into_view(step);
     const hit = hit_at(point.x, point.y);
     if (step.action === 'scroll') {
         scroll_at(hit, to_number(step.scroll_dx, 0), to_number(step.scroll_dy, 0));
-        return;
+        return undefined;
     }
     if (hit === null) {
         throw new Error(`Nothing at (${Math.round(point.x)}, ${Math.round(point.y)}): the point is outside the page.`);
     }
+    if (step.action === 'read') {
+        return read_at(hit, step.read_pattern);
+    }
     if (step.action === 'long_press') {
         await long_press_at(run, hit, step.hold_ms);
     } else if (step.action === 'type') {
-        type_at(hit, step.text, step.clear_first);
+        type_at(hit, fill_vars(step.text, run === null ? null : run.vars), step.clear_first);
     } else {
         click_at(hit, step.action);
     }
+    return undefined;
 }

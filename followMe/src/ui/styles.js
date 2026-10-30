@@ -40,6 +40,13 @@ const PANEL_CSS = `
 .panel { position: fixed; top: 0; bottom: 0; width: 370px; max-width: 100vw; background: var(--bg); border-left: 1px solid var(--line);
   box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .panel.right { right: 0; } .panel.left { left: 0; border-left: 0; border-right: 1px solid var(--line); }
+/* A phone-sized window (or a tab shown as a phone): the panel becomes a sheet at the bottom. */
+@media (max-width: 600px) {
+  .panel, .panel.left, .panel.right { left: 0; right: 0; top: auto; width: auto; height: 55vh; border: 0; border-top: 1px solid var(--line); border-radius: 12px 12px 0 0; }
+}
+.net { border: 0; background: transparent; font-size: 11px; color: var(--muted); padding: 2px 4px; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.net::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.net.on::before { background: var(--ok); } .net.off { color: var(--bad); } .net.off::before { background: var(--bad); }
 .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .logo { font-weight: 800; letter-spacing: -.02em; font-size: 15px; } .logo b { color: var(--accent); }
 .site { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

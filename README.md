@@ -115,8 +115,10 @@ You mark points on the page instead of finding ids, and chain them into an activ
 click here, pause, wait until the page has fully loaded or the URL changed, then click
 there. A side panel lists each site's activities. Each click shows where it is on the
 screen, what it does and how, with numbered marks on the page that you can drag. It
-plays, loops, and carries on after a click loads a new page. Written in Moss's `.moss`
-format, so it needs **Moss**.
+plays, loops, and carries on after a click loads a new page. It only plays while the
+internet is on, can show the site as desktop, mobile or tablet, and can hand off to
+another site in split view and bring back what it read. Written in Moss's `.moss`
+format, so it needs **Moss** (0.2+ for the mobile view and split view).
 
 [Full docs →](followMe/README.md)
 

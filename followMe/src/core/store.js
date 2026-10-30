@@ -8,6 +8,7 @@
  * GM values:
  *     fm_activities  { [id]: struct activity }
  *     fm_prefs       struct prefs
+ *     fm_jobs        { [job id]: struct job_result }   answers of activities played on another site
  * Tab value (GM_getTab): { fm_run: struct saved_run | undefined }
  *
  * struct prefs {
@@ -15,14 +16,19 @@
  *     side: 'right' | 'left';
  *     show_marks: boolean;    numbered marks on the page while an activity is open
  *     tab_y: number;          where the edge tab sits, 0..1 of the window height
+ *     last_activity: string;  activity open in the panel, reopened after a reload
+ *     online_url: string;     page asked to tell whether the internet is on
  * }
  *
  * struct saved_run {
  *     activity_id: string;
  *     step: number;           step being played when the page went away
  *     loop: number;           loop number, from 0
- *     phase: 'after';         the action ran; its "after" checks are next
+ *     phase: 'after' | 'start';   'after': the action ran, its "after" checks are next;
+ *                             'start': the tab was switched to another device, play the step
  *     url_before: string;     URL just before the action (for "URL changed")
+ *     vars: object;           values read so far
+ *     job: struct job | null; set when this run plays for an activity on another site
  *     at: number;             when it was saved; old ones are ignored
  * }
  */
@@ -30,13 +36,14 @@
 const ACTIVITIES_KEY = 'fm_activities';
 const PREFS_KEY = 'fm_prefs';
 const RUN_KEY = 'fm_run';
+const JOBS_KEY = 'fm_jobs';
 const RESUME_WINDOW_MS = 120000;   // a saved run older than this is not resumed
 
 /*
  * prefs_default() -> struct prefs
  */
 function prefs_default() {
-    return { open: false, side: 'right', show_marks: true, tab_y: 0.4 };
+    return { open: false, side: 'right', show_marks: true, tab_y: 0.4, last_activity: '', online_url: ONLINE_URL };
 }
 
 /*
@@ -58,7 +65,13 @@ function save_prefs(prefs) {
  */
 function load_all() {
     const all = GM_getValue(ACTIVITIES_KEY, {});
-    return all !== null && typeof all === 'object' ? all : {};
+    if (all === null || typeof all !== 'object') {
+        return {};
+    }
+    for (const id of Object.keys(all)) {
+        all[id] = activity_fix(all[id]);
+    }
+    return all;
 }
 
 /*
@@ -168,4 +181,52 @@ function load_run_state() {
             resolve(state);
         });
     });
+}
+
+/*
+ * struct job { id: string; activity_id: string; opener: string }   opener: the activity that asked
+ * struct job_result { status: 'running' | 'done' | 'failed' | 'stopped'; vars: object; error: string; at: number }
+ */
+
+/*
+ * load_job(id) -> struct job_result or null
+ */
+function load_job(id) {
+    const jobs = GM_getValue(JOBS_KEY, {});
+    return jobs !== null && typeof jobs === 'object' && jobs[id] !== undefined ? jobs[id] : null;
+}
+
+/*
+ * save_job(id, result) — store a job's result; null forgets it. Results older than a
+ * day are dropped on the way.
+ */
+function save_job(id, result) {
+    const old = GM_getValue(JOBS_KEY, {});
+    const jobs = {};
+    for (const key of Object.keys(old || {})) {
+        if (Date.now() - old[key].at < 86400000) {
+            jobs[key] = old[key];
+        }
+    }
+    if (result === null) {
+        delete jobs[id];
+    } else {
+        jobs[id] = Object.assign({ vars: {}, error: '' }, result, { at: Date.now() });
+    }
+    GM_setValue(JOBS_KEY, jobs);
+}
+
+/*
+ * all_activities() -> every stored activity, of every site, by name
+ */
+function all_activities() {
+    const all = load_all();
+    const out = [];
+    for (const id of Object.keys(all)) {
+        out.push(all[id]);
+    }
+    out.sort(function (a, b) {
+        return a.name.localeCompare(b.name);
+    });
+    return out;
 }

@@ -11,7 +11,8 @@ import vm from 'node:vm';
 import { ORDER, bundle } from '../tools/build.mjs';
 
 const ROOT = new URL('../', import.meta.url);
-const CORE = ['src/core/util.js', 'src/core/steps.js', 'src/core/store.js', 'src/core/checks.js', 'src/core/clicker.js', 'src/core/runner.js'];
+const CORE = ['src/core/util.js', 'src/core/steps.js', 'src/core/store.js', 'src/core/net.js', 'src/core/device.js', 'src/core/checks.js',
+    'src/core/clicker.js', 'src/core/runner.js'];
 
 /*
  * read(path) -> text of a repo file
@@ -22,12 +23,46 @@ function read(path) {
 
 /*
  * page_create(url) -> a VM context holding the core with a fake page and GM storage;
- *   ctx.values is the GM value store, ctx.tab the GM tab store, ctx.done the actions run
+ *   ctx.values is the GM value store, ctx.tab the GM tab store, ctx.done the actions run,
+ *   ctx.typed the texts typed, ctx.reads what 'read' steps find (by label),
+ *   ctx.internet whether the internet probe answers, ctx.device the emulated device;
+ *   shared_values: another page's GM value store, to share it like two tabs do
  */
-function page_create(url) {
-    const values = {};
+function page_create(url, shared_values) {
+    const values = shared_values || {};
     const tab = {};
     const ctx = vm.createContext({
+        navigator: { onLine: true },
+        internet: true,
+        device: null,
+        toasts: [],
+        toast: function (text) {
+            ctx.toasts.push(text);
+        },
+        GM_xmlhttpRequest: function (d) {
+            setTimeout(function () {
+                if (ctx.internet) {
+                    d.onload({ status: 204 });
+                } else {
+                    d.onerror({});
+                }
+            }, 5);
+        },
+        GM_device: {
+            get: async function () {
+                return ctx.device;
+            },
+            set: async function (mode, opts) {
+                ctx.device = { mode: mode, width: opts.orientation === 'landscape' ? 915 : 412, height: opts.orientation === 'landscape' ? 412 : 915 };
+                ctx.reloaded = true;
+                return ctx.device;
+            },
+            clear: async function () {
+                ctx.device = null;
+                ctx.reloaded = true;
+                return true;
+            },
+        },
         console: console, setTimeout: setTimeout, clearTimeout: clearTimeout, Promise: Promise, URL: URL, JSON: JSON, Math: Math, Date: Date,
         location: { href: url },
         document: { readyState: 'complete', documentElement: {} },
@@ -35,7 +70,7 @@ function page_create(url) {
         MutationObserver: function () {
             return { observe: function () {}, disconnect: function () {} };
         },
-        window: { scrollX: 0, scrollY: 0, innerWidth: 1000, innerHeight: 800 },
+        window: { scrollX: 0, scrollY: 0, innerWidth: 1000, innerHeight: 800, addEventListener: function () {} },
         GM_getValue: function (key, fallback) {
             return key in values ? JSON.parse(values[key]) : fallback;
         },
@@ -59,9 +94,16 @@ function page_create(url) {
     // Expose the script's top-level bindings, and record actions instead of clicking.
     code += 'globalThis.fm = { activity_create, step_create, check_create, step_point, step_title, describe_action, describe_check, '
         + 'activity_runs_on, activity_duration, save_activity, load_activity, activities_for, export_activities, import_activities, '
-        + 'run_check, start_run, stop_run, resume_saved_run, load_run_state, glob_test, format_ms };\n'
+        + 'run_check, start_run, stop_run, resume_saved_run, start_job, load_run_state, glob_test, format_ms, fill_vars, activity_fix, check_online };\n'
         + 'globalThis.done = [];\n'
-        + 'do_action = async function (run, step) { globalThis.done.push(step.label); if (globalThis.on_action) { globalThis.on_action(step); } };\n';
+        + 'globalThis.typed = [];\n'
+        + 'globalThis.reads = {};\n'
+        + 'do_action = async function (run, step) {\n'
+        + '    globalThis.done.push(step.label);\n'
+        + '    if (globalThis.on_action) { globalThis.on_action(step); }\n'
+        + '    if (step.action === \'type\') { globalThis.typed.push(fill_vars(step.text, run === null ? null : run.vars)); }\n'
+        + '    return step.action === \'read\' ? globalThis.reads[step.label] : undefined;\n'
+        + '};\n';
     vm.runInContext(code, ctx);
     ctx.values = values;
     ctx.tab = tab;
@@ -197,6 +239,146 @@ test('runner: a click that loads a new page carries on there', async function ()
     const resumed = await next.fm.resume_saved_run();
     assert.equal(resumed.phase, 'done');
     assert.deepEqual([...next.done], ['next'], 'the submit click is not repeated; "URL changed" already holds');
+});
+
+test('values: a "read" step keeps text that later steps type as {name}', async function () {
+    const ctx = page_create('https://app.test/');
+    const a = ctx.fm.activity_create('Copy', 'https://app.test/');
+    const read = quick_step(ctx, 'read');
+    read.action = 'read';
+    read.var_name = 'code';
+    const type = quick_step(ctx, 'type');
+    type.action = 'type';
+    type.text = 'Code {code}, keep {unknown}';
+    a.steps = [read, type];
+    ctx.reads.read = 'X-42';
+    const run = await ctx.fm.start_run(a, {});
+    assert.equal(run.phase, 'done');
+    assert.deepEqual([...ctx.typed], ['Code X-42, keep {unknown}']);
+    assert.equal(run.vars.code, 'X-42');
+    assert.equal(ctx.fm.fill_vars('{a}{b}', { a: 1 }), '1{b}');
+    const old = ctx.fm.activity_fix({ id: 'x', name: 'Old', site: 'https://old.test', steps: [{ label: 's' }] });
+    assert.equal(old.device, 'desktop', 'activities from 0.1 get the new fields');
+    assert.equal(old.start_url, 'https://old.test/');
+    assert.equal(old.steps[0].var_name, 'answer');
+});
+
+test('internet: a run waits while offline and goes on when it is back, or stops', async function () {
+    const ctx = page_create('https://app.test/');
+    const a = ctx.fm.activity_create('Net', 'https://app.test/');
+    a.steps = [quick_step(ctx, 'one')];
+    ctx.internet = false;
+    assert.equal(await ctx.fm.check_online(true), false);
+    setTimeout(function () {
+        ctx.internet = true;
+    }, 100);
+    const run = await ctx.fm.start_run(a, {});
+    assert.equal(run.phase, 'done');
+    assert.deepEqual([...ctx.done], ['one']);
+    assert.match(ctx.toasts[0], /Internet is back/);
+
+    ctx.done.length = 0;
+    ctx.internet = false;
+    await ctx.fm.check_online(true);
+    a.offline = 'stop';
+    const stopped = await ctx.fm.start_run(a, {});
+    assert.equal(stopped.phase, 'failed');
+    assert.match(stopped.error, /No internet connection/);
+    assert.deepEqual([...ctx.done], []);
+
+    ctx.done.length = 0;
+    a.need_online = false;
+    assert.equal((await ctx.fm.start_run(a, {})).phase, 'done', 'an activity that doesn\'t need it plays offline');
+    const check = ctx.fm.check_create('online');
+    check.timeout_ms = 150;
+    assert.equal(await ctx.fm.run_check({ stopped: false }, check, '', null), 'timeout');
+});
+
+test('device: a mobile activity switches the tab first, then plays after the reload', async function () {
+    const ctx = page_create('https://app.test/');
+    const a = ctx.fm.activity_create('Phone', 'https://app.test/');
+    a.device = 'mobile';
+    a.steps = [quick_step(ctx, 'tap')];
+    ctx.fm.save_activity(a);
+    await ctx.fm.start_run(a, {});
+    assert.ok(ctx.reloaded, 'switched (and so reloaded) the tab');
+    assert.equal(ctx.device.mode, 'mobile');
+    assert.deepEqual([...ctx.done], [], 'nothing played before the reload');
+    assert.equal(ctx.tab.fm_run.phase, 'start');
+
+    const next = page_create('https://app.test/');
+    Object.assign(next.values, ctx.values);
+    Object.assign(next.tab, ctx.tab);
+    next.device = ctx.device;
+    const run = await next.fm.resume_saved_run();
+    assert.equal(run.phase, 'done');
+    assert.deepEqual([...next.done], ['tap']);
+    assert.ok(!next.reloaded);
+
+    // The switch didn't take (debugging bar cancelled): stop instead of reloading forever.
+    const again = page_create('https://app.test/');
+    Object.assign(again.values, ctx.values);
+    Object.assign(again.tab, ctx.tab);
+    const failed = await again.fm.resume_saved_run();
+    assert.equal(failed.phase, 'failed');
+    assert.match(failed.error, /could not be shown as/);
+});
+
+test('other site: a step plays an activity beside this page and brings back what it read', async function () {
+    const main = page_create('https://shop.test/');
+    const lookup = main.fm.activity_create('Look up price', 'https://prices.test/search');
+    const read = quick_step(main, 'read price');
+    read.action = 'read';
+    read.var_name = 'price';
+    lookup.steps = [read];
+    main.fm.save_activity(lookup);
+
+    const a = main.fm.activity_create('Buy', 'https://shop.test/');
+    const side = quick_step(main, 'ask');
+    side.action = 'side';
+    side.side_activity = lookup.id;
+    side.side_url = 'https://prices.test/search?q={item}';
+    const type = quick_step(main, 'type');
+    type.action = 'type';
+    type.text = 'Offer {price}';
+    a.steps = [side, type];
+
+    const calls = [];
+    main.GM_split = {
+        open: async function (url, opts) {
+            calls.push(['open', url, opts.side]);
+            // followMe starts in the new page, finds the job and plays the activity.
+            const other = page_create(url, main.values);
+            other.reads['read price'] = '$12';
+            other.GM_split = {
+                data: async function () {
+                    return { data: JSON.parse(JSON.stringify(opts.data)), opener: 1, how: 'split' };
+                },
+            };
+            setTimeout(function () {
+                other.fm.start_job().then(function (run) {
+                    calls.push(['side run', run.phase, run.vars.item]);
+                });
+            }, 20);
+            return { id: 7, how: 'split' };
+        },
+        isOpen: async function () {
+            return true;
+        },
+        close: async function (id) {
+            calls.push(['close', id]);
+            return true;
+        },
+    };
+    const run = await main.fm.start_run(a, { vars: { item: 'lamp' } });
+    assert.equal(run.phase, 'done', run.error);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+        ['open', 'https://prices.test/search?q=lamp', 'right'],
+        ['side run', 'done', 'lamp'],
+        ['close', 7],
+    ]);
+    assert.deepEqual([...main.typed], ['Offer $12']);
+    assert.deepEqual(JSON.parse(main.values.fm_jobs), {}, 'the job is cleaned up');
 });
 
 test('build: followMe.moss is the header plus every source file, and up to date', function () {

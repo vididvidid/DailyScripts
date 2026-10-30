@@ -17,10 +17,11 @@
  *     status: HTMLElement | null;         the run status bar
  *     rows: HTMLElement[];                step rows, to mark the playing one
  *     hidden: boolean;                    hidden while marking a point
+ *     net: HTMLElement | null;            the "online / offline" light in the header
  * }
  */
 
-const panel = { layer: null, view: 'list', activity: null, open_step: -1, prefs: null, status: null, rows: [], hidden: false };
+const panel = { layer: null, view: 'list', activity: null, open_step: -1, prefs: null, status: null, rows: [], hidden: false, net: null };
 
 // ---------- opening and closing ----------
 
@@ -130,9 +131,10 @@ async function with_panel_hidden(task) {
 }
 
 /*
- * add_point_step() — mark a pixel and add a click there (after the open step, or last)
+ * add_point_step(action) — mark a pixel and add a step there (after the open step, or
+ *   last); action: 'click' when left out
  */
-async function add_point_step() {
+async function add_point_step(action) {
     const at = panel.open_step >= 0 ? panel.open_step + 1 : panel.activity.steps.length;
     const point = await with_panel_hidden(function () {
         return pick_point(at + 1);
@@ -142,6 +144,9 @@ async function add_point_step() {
         return;
     }
     const step = step_create(point.x, point.y, view_now());
+    if (typeof action === 'string') {
+        step.action = action;
+    }
     commit(function (activity) {
         activity.steps.splice(at, 0, step);
     }, false);
@@ -150,7 +155,7 @@ async function add_point_step() {
 }
 
 /*
- * add_other_step(action) — add a step that needs no point ('wait' or 'key')
+ * add_other_step(action) — add a step that needs no point ('wait', 'key' or 'side')
  */
 function add_other_step(action) {
     const at = panel.open_step >= 0 ? panel.open_step + 1 : panel.activity.steps.length;
@@ -200,7 +205,29 @@ function open_activity(activity) {
     panel.activity = activity;
     panel.view = 'detail';
     panel.open_step = -1;
+    panel.prefs.last_activity = activity.id;
+    save_prefs(panel.prefs);
     panel_render();
+}
+
+/*
+ * close_activity() — back to the list
+ */
+function close_activity() {
+    panel.view = 'list';
+    panel.activity = null;
+    panel.prefs.last_activity = '';
+    save_prefs(panel.prefs);
+    panel_render();
+}
+
+/*
+ * switch_device(mode, orientation) — show this tab as that device now (it reloads)
+ */
+function switch_device(mode, orientation) {
+    device_switch(mode, orientation).catch(function (e) {
+        toast(e.message, { type: 'error' });
+    });
 }
 
 /*
@@ -212,7 +239,7 @@ function new_activity() {
         return;
     }
     open_activity(save_activity(activity_create(name.trim() || 'Untitled', location.href)));
-    add_point_step();
+    add_point_step('click');
 }
 
 /*
@@ -326,13 +353,64 @@ function render_action_fields(index) {
             number_field(step.scroll_dx, set('scroll_dx', true)), 'px'));
     } else if (step.action === 'long_press') {
         out.push(h('div', { class: 'row' }, 'Hold for', seconds_field(step.hold_ms, set('hold_ms', true)), 's'));
+    } else if (step.action === 'read') {
+        out.push(h('div', { class: 'row' }, 'Keep it as {', text_field(step.var_name, function (v) {
+            set('var_name', true)(v.replace(/[^\w-]/g, '') || 'answer');
+        }, { style: { width: '110px' } }), '}'),
+        h('div', { class: 'row' }, text_field(step.read_pattern, set('read_pattern', true), {
+            placeholder: 'Only part of it: /regex/ (first group), optional', class: 'grow',
+        })));
+    } else if (step.action === 'side') {
+        out.push(render_side_fields(index));
     }
-    if (step.action !== 'wait') {
+    if (step.action === 'type' || step.action === 'side') {
+        out.push(h('div', { class: 'muted' }, 'Write {name} to put in a value a "Read text" step read earlier in the run.'));
+    }
+    if (step.action !== 'wait' && step.action !== 'side') {
         out.push(h('div', { class: 'row' }, 'Do it', number_field(step.repeat, function (n) {
             set('repeat', true)(clamp(Math.round(n), 1, 1000));
         }, { min: '1' }), 'time(s), every', seconds_field(step.repeat_pause_ms, set('repeat_pause_ms', false)), 's'));
     }
     return out;
+}
+
+/*
+ * render_side_fields(index) -> the fields of an "other site" step
+ */
+function render_side_fields(index) {
+    const step = panel.activity.steps[index];
+    const choices = { '': '— pick an activity —' };
+    for (const other of all_activities()) {
+        if (other.id !== panel.activity.id) {
+            choices[other.id] = `${other.name} (${new URL(other.site).hostname})`;
+        }
+    }
+    const other = step.side_activity === '' ? null : load_activity(step.side_activity);
+    return [
+        h('div', { class: 'row' }, 'Play', select_field(step.side_activity, choices, function (v) {
+            edit_step(index, function (s) { s.side_activity = v; }, true);
+        })),
+        Object.keys(choices).length === 1
+            ? h('div', { class: 'muted' }, 'First make that activity: open the other site, open followMe there and record its steps, ending with a "Read text" step for each answer you need.')
+            : null,
+        h('div', { class: 'row' }, 'on', text_field(step.side_url, function (v) {
+            edit_step(index, function (s) { s.side_url = v.trim(); }, true);
+        }, { placeholder: other === null ? 'https://… (page to open)' : other.start_url, class: 'grow', title: 'Page to open; empty = where that activity was made' })),
+        h('div', { class: 'row' }, 'In', select_field(step.side_how, SIDE_HOWS, function (v) {
+            edit_step(index, function (s) { s.side_how = v; }, false);
+        }), select_field(step.side_place, { right: 'on the right', left: 'on the left' }, function (v) {
+            edit_step(index, function (s) { s.side_place = v; }, false);
+        })),
+        h('div', { class: 'row' }, 'Give up after', seconds_field(step.side_timeout_ms, function (ms) {
+            edit_step(index, function (s) { s.side_timeout_ms = Math.max(1000, ms); }, false);
+        }), 's'),
+        h('label', { class: 'row' }, h('input', {
+            type: 'checkbox', checked: step.side_close,
+            on_change: function (event) {
+                edit_step(index, function (s) { s.side_close = event.target.checked; }, false);
+            },
+        }), 'Close it when done and come back here'),
+    ];
 }
 
 /*
@@ -399,8 +477,13 @@ function render_step_body(index) {
         h('button', {
             class: 'btn small', title: 'Do only this step\'s action now, without its waits',
             on_click: function () {
-                test_step(step).then(function () {
-                    toast(`${step_title(step, index)} done`);
+                test_step(step, panel.activity).then(function (vars) {
+                    const names = Object.keys(vars);
+                    const got = [];
+                    for (const name of names) {
+                        got.push(`{${name}} = "${String(vars[name]).slice(0, 80)}"`);
+                    }
+                    toast(names.length === 0 ? `${step_title(step, index)} done` : `${step_title(step, index)}: ${got.join(', ')}`);
                 }, function (e) {
                     toast(e.message, { type: 'error' });
                 });
@@ -502,7 +585,7 @@ function render_detail() {
     }
     return [
         h('div', { class: 'row' },
-            h('button', { class: 'btn ghost small', on_click: function () { panel.view = 'list'; panel.activity = null; panel_render(); } }, '←'),
+            h('button', { class: 'btn ghost small', on_click: close_activity }, '←'),
             text_field(a.name, function (v) {
                 commit(function (act) { act.name = v.trim() || 'Untitled'; }, false);
             }, { class: 'name grow', 'aria-label': 'Activity name' })),
@@ -519,15 +602,71 @@ function render_detail() {
         h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Runs on'), text_field(a.pages, function (v) {
             commit(function (act) { act.pages = v.trim() || `${act.site}/*`; }, false);
         }, { class: 'grow', title: 'Pages this activity is for: a * pattern or /regex/' })),
+        render_device_row(a),
+        h('div', { class: 'row' },
+            h('label', { class: 'row' }, h('input', {
+                type: 'checkbox', checked: a.need_online,
+                on_change: function (event) {
+                    commit(function (act) { act.need_online = event.target.checked; }, true);
+                },
+            }), 'Only play with internet'),
+            a.need_online ? select_field(a.offline, { wait: 'if it\'s off, wait for it', stop: 'if it\'s off, stop' }, function (v) {
+                commit(function (act) { act.offline = v; }, false);
+            }) : null),
         h('div', { class: 'steps' }, steps),
         h('div', { class: 'row' },
-            h('button', { class: 'btn primary', on_click: add_point_step }, '＋ Add click (mark on page)'),
-            select_field('', { '': '＋ Other step…', wait: 'Only wait', key: 'Press a key' }, function (v) {
-                if (v !== '') {
+            h('button', { class: 'btn primary', on_click: function () { add_point_step('click'); } }, '＋ Add click (mark on page)'),
+            select_field('', {
+                '': '＋ Other step…', read: 'Read text (mark on page)', side: 'Run on another site (split view)', wait: 'Only wait', key: 'Press a key',
+            }, function (v) {
+                if (v === 'read') {
+                    add_point_step('read');
+                } else if (v !== '') {
                     add_other_step(v);
                 }
             })),
     ];
+}
+
+/*
+ * render_device_row(a) -> "View as [Mobile] [Portrait]", and a button when this tab is
+ *   shown differently
+ */
+function render_device_row(a) {
+    const same = device_matches(device_current, a.device, a.orientation);
+    return h('div', { class: 'row' },
+        h('span', { class: 'muted' }, 'View as'),
+        select_field(a.device, DEVICES, function (v) {
+            commit(function (act) { act.device = v; }, true);
+        }),
+        a.device === 'desktop' ? null : select_field(a.orientation, ORIENTATIONS, function (v) {
+            commit(function (act) { act.orientation = v; }, true);
+        }),
+        same ? null : h('button', {
+            class: 'btn small', title: 'Show this tab that way now, to mark points on that layout (the page reloads)',
+            on_click: function () { switch_device(a.device, a.orientation); },
+        }, 'Show it now'),
+        !same || device_current.mode === 'desktop' ? null : h('span', { class: 'muted' }, '· this tab now'),
+        device_supported() ? null : h('span', { class: 'muted' }, '(needs Moss 0.2+)'));
+}
+
+/*
+ * render_net() — the online light in the header
+ */
+function render_net() {
+    if (panel.net === null) {
+        return;
+    }
+    let state = 'checking';
+    if (net.online === true) {
+        state = 'on';
+    } else if (net.online === false) {
+        state = 'off';
+    }
+    const words = { on: 'Online', off: 'Offline', checking: 'Checking…' };
+    panel.net.className = `net ${state}`;
+    panel.net.textContent = words[state];
+    panel.net.title = state === 'off' ? 'No internet connection: activities that need it wait. Click to check again.' : 'Internet connection — click to check again';
 }
 
 /*
@@ -587,12 +726,21 @@ function panel_render() {
     } else {
         body = render_list();
     }
+    panel.net = h('button', {
+        class: 'net',
+        on_click: function () {
+            panel.net.className = 'net checking';
+            panel.net.textContent = 'Checking…';
+            check_online(true).then(render_net);
+        },
+    });
     panel.status = h('div', { class: 'status', hidden: true }, h('span', { class: 'text' }), h('button', { class: 'btn small', on_click: stop_run }, '■ Stop'));
     const side = panel.prefs.side;
     const root = h('div', { class: `fm panel ${side}` },
         h('div', { class: 'head' },
             h('span', { class: 'logo' }, 'follow', h('b', null, 'Me')),
             h('span', { class: 'site grow' }, location.hostname),
+            panel.net,
             h('button', {
                 class: 'btn ghost small', title: 'Move to the other side',
                 on_click: function () {
@@ -617,6 +765,7 @@ function panel_render() {
             h('span', { class: 'grow' }),
             h('button', { class: 'btn small', on_click: function () { panel.view = 'transfer'; panel_render(); } }, 'Export / import')));
     panel.layer.root.replaceChildren(h('style', null, BASE_CSS + PANEL_CSS), root);
+    render_net();
     show_marks();
     if (current_run !== null) {
         render_status(current_run);

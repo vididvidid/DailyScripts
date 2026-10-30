@@ -1,6 +1,6 @@
 {
   "name": "followme",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Tap-by-pixel website automation for Moss: mark points, chain clicks with pauses and page checks, replay them.",
   "type": "module",
