@@ -1,77 +1,99 @@
 // ==Moss==
 // name:        mailForward
 // namespace:   https://github.com/vididvidid/DailyScripts
-// version:     1.0.0
-// description: Forwards new SnappyMail inbox mail to a personal address using only the session already logged in to that tab. For a company webmail with no server-side filters. Does nothing at all when you are not logged in.
+// version:     2.0.0
+// description: Forwards new SnappyMail inbox mail to a personal address using the session the browser is already signed in with. Runs from whatever page you are on, so the webmail tab does not need to be open. Does nothing while that session is signed out.
 // author:      vididvidid
 // homepage:    https://github.com/vididvidid/DailyScripts/tree/main/mailForward
-// match:       https://mail.sthithaquantum.com/*
+// match:       *://*/*
 // noframes:
 // run-at:      document-idle
 // grant:
+//   - GM_xmlhttpRequest
 //   - GM_getValue
 //   - GM_setValue
 //   - GM_registerMenuCommand
+// connect:
+// # the webmail this forwards from
+//   - mail.sthithaquantum.com
 // ==/Moss==
 
 'use strict';
 
 /*
- * mailForward — a client-side "forward rule" for a SnappyMail webmail that has no Sieve
+ * mailForward — a client-side "forward rule" for a SnappyMail webmail with no Sieve
  * filters.
  *
- * It never has credentials of its own. Every request goes through the page's own
- * `rl.fetchJSON`, which carries the session cookies and the X-SM-Token of the tab you
- * are already logged in to. When that session is gone, the script makes no request at
- * all: `logged_in()` is checked before every call, and AppData's `Auth` flag is the
- * gate.
+ * Like gmailOtp reading Gmail's Atom feed, this does not need the webmail open. It runs
+ * on whatever page you are on and reaches the webmail through GM_xmlhttpRequest, which
+ * carries the cookies the browser already holds for that host. Close the mail tab and
+ * forwarding carries on; close the browser and nothing runs at all, because a user
+ * script has no life of its own.
  *
- * Each pass:
- *   1. MessageList the newest INBOX messages,
- *   2. keep the ones whose UID is above the last one handled,
- *   3. Message-fetch each and send it on to CONFIG.forward_to as a new mail,
- *   4. store the highest UID handled, per account.
+ * It owns no credentials. Each pass starts by reading AppData, which answers with the
+ * state of the browser's existing session:
  *
- * The API shapes below are from SnappyMail v2.38.2 (the version this server runs):
- *   POST  /?/Json/&q[]=/0/                        { Action: 'MessageList', folder, limit, ... }
- *   GET   /?/Json/&q[]=/0/Message/&q[]=/<b64>     b64 of [folder, uid, threads, accountHash]
- *   POST  /?/Json/&q[]=/0/                        { Action: 'SendMessage', to, subject, plain, ... }
- * Action parameters are camelCase, and the body of a message is `plain` / `html`.
+ *     GET  /?/AppData/0/<rand>/     -> { Auth, accountHash, System: { token } }
+ *
+ * When Auth is not true the session is signed out or expired, and the pass stops there
+ * without touching anything else. When it is true, that same reply hands over the CSRF
+ * token the three working calls need:
+ *
+ *     POST /?/Json/&q[]=/0/                      { Action: 'MessageList', folder, limit, ... }
+ *     GET  /?/Json/&q[]=/0/Message/&q[]=/<b64>   b64 of [folder, uid, threads, accountHash]
+ *     POST /?/Json/&q[]=/0/                      { Action: 'SendMessage', to, subject, plain, ... }
+ *
+ * All verified against SnappyMail v2.38.2, the version this server runs: action
+ * parameters are camelCase, message fields are uid / subject / from / dateTimestamp,
+ * and a body is plain / html.
+ *
+ * Because the script loads in every tab, the tabs share one lease through storage, so
+ * only one of them polls and a message cannot be forwarded twice over.
  */
 
 const CONFIG = {
-    // Where new mail is sent on to.
+    // The webmail to read, and where new mail is sent on to.
+    host: 'https://mail.sthithaquantum.com',
     forward_to: 'vididvidid@gmail.com',
 
-    // Who the forward is sent as. This server does not put Identities in AppData, so
-    // it is set here rather than detected. Must be an address this account may send as.
+    // Who the forward is sent as. This server sends no Identities in AppData, so it is
+    // set here rather than detected. Must be an address this account may send as.
     send_as: '"Yash Kumar Kasaudhan" <yash@sthithaquantum.com>',
 
     // Mailbox to watch, and how many recent messages to look at each pass.
     folder: 'INBOX',
     scan_limit: 20,
 
-    // How often to check. Note: this account auto-logs-out after 30 minutes, so an
-    // hourly timer will often wake to a dead session and (correctly) do nothing. The
-    // focus check below is what makes it fire in practice, whenever you come back to
-    // the tab. Lower this to 10 * 60 * 1000 if you want it to keep up on its own.
-    check_every_ms: 60 * 60 * 1000,
+    // How often the tab holding the lease checks. Each check also keeps the webmail
+    // session alive, so it will no longer hit the 30 minute auto-logout on its own.
+    check_every_ms: 10 * 60 * 1000,
 
-    // Re-check when the tab is focused, at most this often.
+    // Also check when a tab is focused, at most this often.
     focus_min_gap_ms: 5 * 60 * 1000,
 
-    // Wait this long after load before the first pass, so the app finishes booting.
+    // Wait this long after a page loads before the first pass.
     first_pass_delay_ms: 8000,
 
-    // true = log what it WOULD forward and send nothing. Flip to false once the console
-    // shows it picking up the right messages.
+    // A tab must renew the lease within this long or another tab takes over.
+    lease_ttl_ms: 25 * 60 * 1000,
+
+    // How long to wait on any one request.
+    timeout_ms: 20000,
+
+    // true = log what it WOULD forward and send nothing.
     dry_run: true,
 
     // Folder to file a copy of each forward in; '' keeps Sent clean.
-    save_folder: ''
+    save_folder: '',
+
+    // true = also log the quiet passes ("no new mail"). Off, because this runs in
+    // every tab.
+    verbose: false
 };
 
 const LOG_STYLE = 'color:#e67e22;font-weight:bold';
+const LEASE_KEY = 'mailforward.lease';
+const TAB_ID = Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
 
 let last_run_at = 0;
 
@@ -87,51 +109,152 @@ function log() {
 }
 
 /*
- * app_ready() -> true when SnappyMail's own transport is on the page
+ * quiet_log(...parts) -> log(), but only when CONFIG.verbose is on
  */
-function app_ready() {
-    if (typeof window.rl !== 'object' || window.rl === null) {
-        return false;
+function quiet_log() {
+    if (CONFIG.verbose) {
+        log.apply(null, arguments);
     }
-    if (typeof window.rl.fetchJSON !== 'function') {
-        return false;
-    }
-    return typeof window.rl.settings === 'object' && window.rl.settings !== null;
+}
+
+/* ---------- transport ---------- */
+
+/*
+ * request(options) -> Promise<struct reply>, never rejects
+ *
+ * struct reply { ok: boolean; status: number; text: string; }
+ *
+ * options is { method, url, headers, data }. Cookies for CONFIG.host ride along,
+ * which is the whole point: the session is the browser's, not the script's.
+ */
+function request(options) {
+    return new Promise(function (resolve) {
+        function done(response) {
+            resolve({
+                ok: response.status >= 200 && response.status < 300,
+                status: response.status,
+                text: typeof response.responseText === 'string' ? response.responseText : ''
+            });
+        }
+        function failed() {
+            resolve({ ok: false, status: 0, text: '' });
+        }
+        GM_xmlhttpRequest({
+            method: options.method,
+            url: options.url,
+            headers: options.headers,
+            data: options.data,
+            timeout: CONFIG.timeout_ms,
+            onload: done,
+            onerror: failed,
+            ontimeout: failed
+        });
+    });
 }
 
 /*
- * settings_get(key) -> a value from the AppData the server sent this tab, or null
+ * parse_json(text) -> the parsed value, or null when it is not JSON
  */
-function settings_get(key) {
+function parse_json(text) {
     try {
-        const value = window.rl.settings.get(key);
-        return value === undefined ? null : value;
+        return JSON.parse(text);
     } catch (e) {
         return null;
     }
 }
 
 /*
- * logged_in() -> true only while this tab holds a live, authenticated session.
- * Checked before every request: when it is false the script touches nothing.
+ * cache_buster() -> a value that keeps a GET off the cache
  */
-function logged_in() {
-    if (!app_ready()) {
-        return false;
+function cache_buster() {
+    return Math.random().toString().slice(2);
+}
+
+/* ---------- session ---------- */
+
+/*
+ * read_session() -> Promise<struct session | null>
+ *
+ * struct session { token: string; account_hash: string; }
+ *
+ * Reads AppData with the browser's cookies. null means no usable signed-in session,
+ * and every caller stops there rather than trying anything else.
+ */
+async function read_session() {
+    const url = CONFIG.host + '/?/AppData/0/' + cache_buster() + '/';
+    const reply = await request({
+        method: 'GET',
+        url: url,
+        headers: { 'Accept': 'application/json' }
+    });
+    if (!reply.ok) {
+        quiet_log('AppData unreachable (status ' + reply.status + ')');
+        return null;
     }
-    if (settings_get('Auth') !== true) {
-        return false;
+    const data = parse_json(reply.text);
+    if (data === null || data.Auth !== true) {
+        return null;
     }
-    return account_hash().length > 0;
+    const system = typeof data.System === 'object' && data.System !== null ? data.System : {};
+    const token = typeof system.token === 'string' ? system.token : '';
+    const hash = typeof data.accountHash === 'string' ? data.accountHash : '';
+    if (token === '' || hash === '') {
+        quiet_log('session reported signed in but carried no token');
+        return null;
+    }
+    return { token: token, account_hash: hash };
+}
+
+/* ---------- api ---------- */
+
+/*
+ * unwrap(action, data) -> data.Result, or throws with what the server said instead
+ */
+function unwrap(action, data) {
+    if (data === null) {
+        throw new Error(action + ': no JSON in reply');
+    }
+    if (data.Result === undefined || data.Result === null || data.Result === false) {
+        throw new Error(action + ': refused (ErrorCode ' + data.ErrorCode + ')');
+    }
+    return data.Result;
 }
 
 /*
- * account_hash() -> the server's hash for the signed-in account, '' when absent.
- * It identifies the account in Message raw keys and in stored state.
+ * rpc_post(session, action, params) -> Promise<Result> for an action taking a JSON body
  */
-function account_hash() {
-    const hash = settings_get('accountHash');
-    return typeof hash === 'string' ? hash : '';
+async function rpc_post(session, action, params) {
+    const body = { Action: action };
+    const keys = Object.keys(params);
+    for (let i = 0; i < keys.length; i++) {
+        body[keys[i]] = params[keys[i]];
+    }
+    const reply = await request({
+        method: 'POST',
+        url: CONFIG.host + '/?/Json/&q[]=/0/',
+        headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-SM-Token': session.token
+        },
+        data: JSON.stringify(body)
+    });
+    if (!reply.ok) {
+        throw new Error(action + ': HTTP ' + reply.status);
+    }
+    return unwrap(action, parse_json(reply.text));
+}
+
+/*
+ * b64_url(text) -> URL-safe base64 of text, unpadded, as SnappyMail encodes raw keys
+ */
+function b64_url(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 /*
@@ -151,82 +274,34 @@ function pick(object, names, fallback) {
 }
 
 /*
- * sender() -> the From value to send as, or '' when it cannot be determined
- *
- * CONFIG.send_as wins. Only when that is blank does it try AppData, which on this
- * server carries no Identities list, so the config value is the normal path.
+ * sender_of(item) -> "name <email>" for a list row or message, '' when absent
  */
-function sender() {
-    if (CONFIG.send_as !== '') {
-        return CONFIG.send_as;
-    }
-    const identities = settings_get('Identities');
-    if (Array.isArray(identities) && identities.length > 0) {
-        const email = pick(identities[0], ['email', 'Email'], '');
-        const name = pick(identities[0], ['name', 'Name'], '');
-        if (email !== '') {
-            return name === '' ? email : '"' + name + '" <' + email + '>';
+function sender_of(item) {
+    const from = pick(item, ['from', 'From'], null);
+    let first = null;
+    if (Array.isArray(from) && from.length > 0) {
+        first = from[0];
+    } else if (typeof from === 'object' && from !== null) {
+        const collection = pick(from, ['@Collection', 'Collection'], null);
+        if (Array.isArray(collection) && collection.length > 0) {
+            first = collection[0];
         }
     }
-    const system_email = pick(settings_get('System') || {}, ['Email', 'email'], '');
-    return typeof system_email === 'string' ? system_email : '';
+    if (first === null) {
+        return '';
+    }
+    const email = pick(first, ['email', 'Email'], '');
+    const name = pick(first, ['name', 'DisplayName', 'Name'], '');
+    return name === '' ? email : name + ' <' + email + '>';
 }
 
 /*
- * base_url() -> "https://host/?/" for this install
- */
-function base_url() {
-    return location.origin + location.pathname.replace(/\/+$/, '') + '/?/';
-}
-
-/*
- * b64_url(text) -> URL-safe base64 of text, unpadded, as SnappyMail encodes raw keys
- */
-function b64_url(text) {
-    const bytes = new TextEncoder().encode(text);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-/*
- * unwrap(action, data) -> data.Result, or throws with what the server said instead
- */
-function unwrap(action, data) {
-    if (typeof data !== 'object' || data === null) {
-        throw new Error(action + ': no response');
-    }
-    if (data.Result === undefined || data.Result === null || data.Result === false) {
-        throw new Error(action + ': refused (ErrorCode ' + data.ErrorCode + ')');
-    }
-    return data.Result;
-}
-
-/*
- * rpc_post(action, params) -> Promise<Result> for an action that takes a JSON body
- */
-async function rpc_post(action, params) {
-    if (!logged_in()) {
-        throw new Error('not signed in');
-    }
-    const body = { Action: action };
-    const keys = Object.keys(params);
-    for (let i = 0; i < keys.length; i++) {
-        body[keys[i]] = params[keys[i]];
-    }
-    const data = await window.rl.fetchJSON(base_url() + 'Json/&q[]=/0/', {}, body);
-    return unwrap(action, data);
-}
-
-/*
- * list_recent() -> Promise<struct row[]> newest INBOX messages
+ * list_recent(session) -> Promise<struct row[]> newest INBOX messages
  *
  * struct row { uid: number; subject: string; from: string; }
  */
-async function list_recent() {
-    const result = await rpc_post('MessageList', {
+async function list_recent(session) {
+    const result = await rpc_post(session, 'MessageList', {
         folder: CONFIG.folder,
         offset: 0,
         limit: CONFIG.scan_limit,
@@ -255,40 +330,31 @@ async function list_recent() {
 }
 
 /*
- * sender_of(item) -> "name <email>" for a list row or message, '' when absent
+ * html_to_text(html) -> the readable text inside an HTML body
  */
-function sender_of(item) {
-    const from = pick(item, ['from', 'From'], null);
-    let first = null;
-    if (Array.isArray(from) && from.length > 0) {
-        first = from[0];
-    } else if (typeof from === 'object' && from !== null) {
-        const collection = pick(from, ['@Collection', 'Collection'], null);
-        if (Array.isArray(collection) && collection.length > 0) {
-            first = collection[0];
-        }
-    }
-    if (first === null) {
-        return '';
-    }
-    const email = pick(first, ['email', 'Email'], '');
-    const name = pick(first, ['name', 'DisplayName', 'Name'], '');
-    return name === '' ? email : name + ' <' + email + '>';
+function html_to_text(html) {
+    const box = document.createElement('div');
+    box.innerHTML = html;
+    const text = box.textContent;
+    return typeof text === 'string' ? text.trim() : '';
 }
 
 /*
- * fetch_message(uid) -> Promise<struct mail> the full message behind a list row
+ * fetch_message(session, uid) -> Promise<struct mail> the message behind a list row
  *
  * struct mail { uid: number; subject, from, date, plain: string; }
  */
-async function fetch_message(uid) {
-    if (!logged_in()) {
-        throw new Error('not signed in');
+async function fetch_message(session, uid) {
+    const raw = b64_url(JSON.stringify([CONFIG.folder, uid, 0, session.account_hash]));
+    const reply = await request({
+        method: 'GET',
+        url: CONFIG.host + '/?/Json/&q[]=/0/Message/&q[]=/' + raw,
+        headers: { 'Accept': 'application/json', 'X-SM-Token': session.token }
+    });
+    if (!reply.ok) {
+        throw new Error('Message: HTTP ' + reply.status);
     }
-    const raw = b64_url(JSON.stringify([CONFIG.folder, uid, 0, account_hash()]));
-    const url = base_url() + 'Json/&q[]=/0/Message/&q[]=/' + raw;
-    const data = await window.rl.fetchJSON(url);
-    const result = unwrap('Message', data);
+    const result = unwrap('Message', parse_json(reply.text));
     const stamp = parseInt(pick(result, ['dateTimestamp', 'DateTimeStampInUTC'], '0'), 10);
     let plain = pick(result, ['plain', 'Plain'], '');
     if (plain === '') {
@@ -304,37 +370,27 @@ async function fetch_message(uid) {
 }
 
 /*
- * html_to_text(html) -> the readable text inside an HTML body
- */
-function html_to_text(html) {
-    const box = document.createElement('div');
-    box.innerHTML = html;
-    const text = box.textContent;
-    return typeof text === 'string' ? text.trim() : '';
-}
-
-/*
- * forward_message(mail) -> Promise sending mail on to CONFIG.forward_to
+ * forward_message(session, mail) -> Promise sending mail on to CONFIG.forward_to
  *
  * Sent as a fresh plain-text message quoting the original, not a MIME forward, so
- * attachments stay behind in the company inbox and are not copied out.
+ * attachments stay behind in the company inbox. Because it goes out as a new message
+ * from your own address through your own server, SPF and DKIM still line up.
  */
-async function forward_message(mail) {
-    const from = sender();
-    if (from === '') {
+async function forward_message(session, mail) {
+    if (CONFIG.send_as === '') {
         throw new Error('no send_as address set in CONFIG');
     }
     const header = '---------- Forwarded message ----------\n'
         + 'From: ' + mail.from + '\n'
         + 'Date: ' + mail.date + '\n'
         + 'Subject: ' + mail.subject + '\n\n';
-    return rpc_post('SendMessage', {
+    return rpc_post(session, 'SendMessage', {
         identityID: '',
         messageFolder: '',
         messageUid: 0,
         saveFolder: CONFIG.save_folder,
         draftInfo: null,
-        from: from,
+        from: CONFIG.send_as,
         to: CONFIG.forward_to,
         cc: '',
         bcc: '',
@@ -352,26 +408,47 @@ async function forward_message(mail) {
     });
 }
 
+/* ---------- state, shared by every tab ---------- */
+
 /*
- * state_key() -> the storage key holding the last handled UID for this account
+ * state_key(session) -> the storage key holding the last handled UID for this account
  */
-function state_key() {
-    return 'mailforward.last_uid.' + account_hash();
+function state_key(session) {
+    return 'mailforward.last_uid.' + session.account_hash;
 }
 
 /*
- * get_last_uid() -> Promise<number> last UID handled, 0 when this account is new here
+ * get_last_uid(session) -> Promise<number>, 0 when this account is new here
  */
-async function get_last_uid() {
-    const stored = parseInt(await GM_getValue(state_key(), '0'), 10);
+async function get_last_uid(session) {
+    const stored = parseInt(await GM_getValue(state_key(session), '0'), 10);
     return Number.isFinite(stored) ? stored : 0;
 }
 
 /*
- * set_last_uid(uid) -> Promise storing uid as handled
+ * set_last_uid(session, uid) -> Promise storing uid as handled
  */
-async function set_last_uid(uid) {
-    await GM_setValue(state_key(), String(uid));
+async function set_last_uid(session, uid) {
+    await GM_setValue(state_key(session), String(uid));
+}
+
+/*
+ * hold_lease() -> Promise<boolean>: true when this tab is the one that should poll.
+ *
+ * The script loads in every tab, so without this each of them would forward the same
+ * message. The lease is taken by writing and reading back: whichever tab's write lands
+ * last owns it, and it lapses if that tab stops renewing.
+ */
+async function hold_lease() {
+    const raw = await GM_getValue(LEASE_KEY, '');
+    const current = parse_json(raw === '' ? 'null' : raw);
+    if (current !== null && current.owner !== TAB_ID
+        && Date.now() - current.at < CONFIG.lease_ttl_ms) {
+        return false;
+    }
+    await GM_setValue(LEASE_KEY, JSON.stringify({ owner: TAB_ID, at: Date.now() }));
+    const confirmed = parse_json(await GM_getValue(LEASE_KEY, 'null'));
+    return confirmed !== null && confirmed.owner === TAB_ID;
 }
 
 /*
@@ -404,40 +481,49 @@ function highest_uid(rows) {
 }
 
 /*
- * tick() -> Promise, one pass. Returns straight away unless a live session is present.
+ * tick(forced) -> Promise, one pass. forced skips the lease, for the menu command.
  */
-async function tick() {
-    if (!logged_in()) {
-        log('not signed in — nothing done');
+async function tick(forced) {
+    last_run_at = Date.now();
+
+    const session = await read_session();
+    if (session === null) {
+        quiet_log('no signed-in session — nothing done');
         return;
     }
-    last_run_at = Date.now();
+    if (forced !== true) {
+        const mine = await hold_lease();
+        if (!mine) {
+            quiet_log('another tab is handling this');
+            return;
+        }
+    }
 
     let rows;
     try {
-        rows = await list_recent();
+        rows = await list_recent(session);
     } catch (e) {
         log('could not read the inbox:', e.message);
         return;
     }
     if (rows.length === 0) {
-        log('inbox returned nothing');
+        quiet_log('inbox returned nothing');
         return;
     }
 
-    const last_uid = await get_last_uid();
+    const last_uid = await get_last_uid(session);
 
     // First pass for this account: remember where we came in, forward no backlog.
     if (last_uid === 0) {
         const top = highest_uid(rows);
-        await set_last_uid(top);
+        await set_last_uid(session, top);
         log('starting point set at uid', top, '— only mail after this is forwarded');
         return;
     }
 
     const fresh = newer_than(rows, last_uid);
     if (fresh.length === 0) {
-        log('no new mail');
+        quiet_log('no new mail');
         return;
     }
 
@@ -446,17 +532,18 @@ async function tick() {
         const row = fresh[i];
         log('  uid', row.uid, '·', row.from, '·', row.subject);
         if (CONFIG.dry_run) {
-            await set_last_uid(row.uid);
+            await set_last_uid(session, row.uid);
             continue;
         }
-        if (!logged_in()) {
-            log('  session ended mid-pass — stopping, will resume next check');
-            return;
+        // Re-read in case another tab moved ahead between passes.
+        const seen = await get_last_uid(session);
+        if (seen >= row.uid) {
+            continue;
         }
         try {
-            const mail = await fetch_message(row.uid);
-            await forward_message(mail);
-            await set_last_uid(row.uid);
+            const mail = await fetch_message(session, row.uid);
+            await forward_message(session, mail);
+            await set_last_uid(session, row.uid);
             log('  sent to', CONFIG.forward_to);
         } catch (e) {
             // Leave last_uid below this one so the next pass retries it instead of skipping.
@@ -467,7 +554,7 @@ async function tick() {
 }
 
 /*
- * on_focus() -> runs a pass when the tab is focused and the last one was a while ago
+ * on_focus() -> runs a pass when this tab is focused and the last one was a while ago
  */
 function on_focus() {
     if (document.visibilityState !== 'visible') {
@@ -476,35 +563,45 @@ function on_focus() {
     if (Date.now() - last_run_at < CONFIG.focus_min_gap_ms) {
         return;
     }
-    tick();
+    tick(false);
 }
 
 /*
- * start() -> wires the timers and menu commands, once SnappyMail is on the page
+ * start() -> wires the timers and menu commands
  */
 function start() {
-    if (!app_ready()) {
-        return;
-    }
-    log('loaded ·', CONFIG.dry_run ? 'DRY RUN' : 'LIVE', '· every',
-        Math.round(CONFIG.check_every_ms / 60000), 'min · from',
-        sender() === '' ? '(NOT SET)' : sender(), '· to', CONFIG.forward_to);
-    if (!logged_in()) {
-        log('no session in this tab yet — it will start once you are signed in');
-    }
     try {
         GM_registerMenuCommand('mailForward: check now', function () {
-            tick();
+            tick(true);
         });
         GM_registerMenuCommand('mailForward: forget starting point', async function () {
-            await set_last_uid(0);
+            const session = await read_session();
+            if (session === null) {
+                log('not signed in, nothing to forget');
+                return;
+            }
+            await set_last_uid(session, 0);
             log('starting point cleared — the next check sets a new one');
+        });
+        GM_registerMenuCommand('mailForward: status', async function () {
+            const session = await read_session();
+            if (session === null) {
+                log('signed out · nothing will be forwarded');
+                return;
+            }
+            log('signed in ·', CONFIG.dry_run ? 'DRY RUN' : 'LIVE',
+                '· last handled uid', await get_last_uid(session),
+                '· from', CONFIG.send_as, '· to', CONFIG.forward_to);
         });
     } catch (e) {
         log('menu commands unavailable:', e.message);
     }
-    setTimeout(tick, CONFIG.first_pass_delay_ms);
-    setInterval(tick, CONFIG.check_every_ms);
+    setTimeout(function () {
+        tick(false);
+    }, CONFIG.first_pass_delay_ms);
+    setInterval(function () {
+        tick(false);
+    }, CONFIG.check_every_ms);
     document.addEventListener('visibilitychange', on_focus);
 }
 
