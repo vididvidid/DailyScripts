@@ -1,8 +1,8 @@
 // ==Moss==
 // name:        mailForward
 // namespace:   https://github.com/vididvidid/DailyScripts
-// version:     0.1.0
-// description: Forward new SnappyMail inbox mail to a personal address, on an hourly check, from your own logged-in browser session. For a company webmail that has no server-side filters.
+// version:     1.0.0
+// description: Forwards new SnappyMail inbox mail to a personal address using only the session already logged in to that tab. For a company webmail with no server-side filters. Does nothing at all when you are not logged in.
 // author:      vididvidid
 // homepage:    https://github.com/vididvidid/DailyScripts/tree/main/mailForward
 // match:       https://mail.sthithaquantum.com/*
@@ -12,218 +12,501 @@
 //   - GM_getValue
 //   - GM_setValue
 //   - GM_registerMenuCommand
-//   - GM_notification
 // ==/Moss==
 
+'use strict';
+
 /*
- * mailForward — a tiny client-side "forward rule" for SnappyMail/RainLoop webmail that
- * has no Sieve filters. It runs only on a page where SnappyMail is loaded (it checks for
- * window.rl), reuses that page's own session + CSRF token via rl.fetchJSON, and every
- * CHECK_EVERY_MS it:
+ * mailForward — a client-side "forward rule" for a SnappyMail webmail that has no Sieve
+ * filters.
  *
- *   1. asks the server for the newest INBOX messages,
- *   2. keeps only messages whose UID is greater than the last one it forwarded,
- *   3. forwards each of those to FORWARD_TO, newest-last,
- *   4. remembers the highest UID it handled, per account.
+ * It never has credentials of its own. Every request goes through the page's own
+ * `rl.fetchJSON`, which carries the session cookies and the X-SM-Token of the tab you
+ * are already logged in to. When that session is gone, the script makes no request at
+ * all: `logged_in()` is checked before every call, and AppData's `Auth` flag is the
+ * gate.
  *
- * It never touches mail that was already in the box when you first ran it (baseline), and
- * it starts in DRY_RUN so you can confirm it detects the right messages before it sends a
- * single thing.
+ * Each pass:
+ *   1. MessageList the newest INBOX messages,
+ *   2. keep the ones whose UID is above the last one handled,
+ *   3. Message-fetch each and send it on to CONFIG.forward_to as a new mail,
+ *   4. store the highest UID handled, per account.
+ *
+ * The API shapes below are from SnappyMail v2.38.2 (the version this server runs):
+ *   POST  /?/Json/&q[]=/0/                        { Action: 'MessageList', folder, limit, ... }
+ *   GET   /?/Json/&q[]=/0/Message/&q[]=/<b64>     b64 of [folder, uid, threads, accountHash]
+ *   POST  /?/Json/&q[]=/0/                        { Action: 'SendMessage', to, subject, plain, ... }
+ * Action parameters are camelCase, and the body of a message is `plain` / `html`.
  */
 
 const CONFIG = {
-    // Where new mail should go.
-    FORWARD_TO: 'vididvidid@gmail.com',
+    // Where new mail is sent on to.
+    forward_to: 'vididvidid@gmail.com',
 
-    // Which mailbox to watch and how many recent messages to scan each tick.
-    FOLDER: 'INBOX',
-    SCAN_LIMIT: 20,
+    // Mailbox to watch, and how many recent messages to look at each pass.
+    folder: 'INBOX',
+    scan_limit: 20,
 
-    // Hourly.
-    CHECK_EVERY_MS: 60 * 60 * 1000,
+    // How often to check. Note: this account auto-logs-out after 30 minutes, so an
+    // hourly timer will often wake to a dead session and (correctly) do nothing. The
+    // focus check below is what makes it fire in practice, whenever you come back to
+    // the tab. Lower this to 10 * 60 * 1000 if you want it to keep up on its own.
+    check_every_ms: 60 * 60 * 1000,
 
-    // true  = only log what it WOULD forward (no mail is sent). Flip to false once the
-    //         console shows it detecting the right messages.
-    DRY_RUN: true,
+    // Re-check when the tab is focused, at most this often.
+    focus_min_gap_ms: 5 * 60 * 1000,
 
-    // --- Calibration: SnappyMail JSON action names. These match stock SnappyMail 2.x.
-    // If a call logs "unknown action" or an empty result, fix the name here (see the
-    // capture snippet in mailForward/README notes).
-    ACTION_LIST: 'MessageList',
-    ACTION_MESSAGE: 'Message',
-    ACTION_SEND: 'SendMessage',
+    // Wait this long after load before the first pass, so the app finishes booting.
+    first_pass_delay_ms: 8000,
+
+    // true = log what it WOULD forward and send nothing. Flip to false once the console
+    // shows it picking up the right messages.
+    dry_run: true,
+
+    // Folder to file a copy of each forward in; '' keeps Sent clean.
+    save_folder: ''
 };
 
-const LOG = (...a) => console.log('%c[mailForward]', 'color:#e67e22;font-weight:bold', ...a);
+const LOG_STYLE = 'color:#e67e22;font-weight:bold';
 
-/* Only run where SnappyMail actually is. */
-function snappymail_ready() {
-    return typeof window.rl === 'object'
-        && window.rl !== null
-        && typeof window.rl.fetchJSON === 'function'
-        && typeof window.rl.settings === 'object';
+let last_run_at = 0;
+
+/*
+ * log(...parts) -> writes one tagged console line
+ */
+function log() {
+    const parts = ['%c[mailForward]', LOG_STYLE];
+    for (let i = 0; i < arguments.length; i++) {
+        parts.push(arguments[i]);
+    }
+    console.log.apply(console, parts);
 }
 
-/* The account we are logged in as — used to key stored state so two accounts don't mix. */
-function account_email() {
+/*
+ * app_ready() -> true when SnappyMail's own transport is on the page
+ */
+function app_ready() {
+    if (typeof window.rl !== 'object' || window.rl === null) {
+        return false;
+    }
+    if (typeof window.rl.fetchJSON !== 'function') {
+        return false;
+    }
+    return typeof window.rl.settings === 'object' && window.rl.settings !== null;
+}
+
+/*
+ * settings_get(key) -> a value from the AppData the server sent this tab, or null
+ */
+function settings_get(key) {
     try {
-        const sys = window.rl.settings.get('System') || {};
-        return sys.Email || window.rl.settings.app('Email') || 'unknown';
+        const value = window.rl.settings.get(key);
+        return value === undefined ? null : value;
     } catch (e) {
-        return 'unknown';
+        return null;
     }
 }
 
 /*
- * Build the JSON-RPC endpoint. Confirmed from a live capture on this server:
- *   POST https://mail.sthithaquantum.com/?/Json/&q[]=/0/
+ * logged_in() -> true only while this tab holds a live, authenticated session.
+ * Checked before every request: when it is false the script touches nothing.
  */
-function rpc_url() {
-    return location.origin + '/?/Json/&q[]=/0/';
+function logged_in() {
+    if (!app_ready()) {
+        return false;
+    }
+    if (settings_get('Auth') !== true) {
+        return false;
+    }
+    return account_hash().length > 0;
 }
 
 /*
- * call(action, params) -> Promise<Result> using the page's own authenticated transport.
- * rl.fetchJSON adds the X-SM-Token header and same-origin cookies for us.
+ * account_hash() -> the server's hash for the signed-in account, '' when absent.
+ * It identifies the account in Message raw keys and in stored state.
  */
-async function call(action, params) {
-    const body = Object.assign({ Action: action }, params || {});
-    const data = await window.rl.fetchJSON(rpc_url(), {}, body);
-    if (!data || data.Action !== action) {
-        throw new Error('unexpected response for ' + action + ': ' + JSON.stringify(data).slice(0, 200));
+function account_hash() {
+    const hash = settings_get('accountHash');
+    return typeof hash === 'string' ? hash : '';
+}
+
+/*
+ * pick(object, names, fallback) -> the first present, non-empty property in names
+ */
+function pick(object, names, fallback) {
+    if (typeof object !== 'object' || object === null) {
+        return fallback;
     }
-    if (data.Result === false || data.Result == null) {
-        throw new Error('server refused ' + action + ' (ErrorCode ' + data.ErrorCode + ')');
+    for (let i = 0; i < names.length; i++) {
+        const value = object[names[i]];
+        if (value !== undefined && value !== null && value !== '') {
+            return value;
+        }
+    }
+    return fallback;
+}
+
+/*
+ * identity() -> struct { email, from } for the signed-in account, or null when unknown
+ *
+ * struct identity { email: string; from: string; }   from is "Name <email>" when a name is known
+ */
+function identity() {
+    const identities = settings_get('Identities');
+    let email = '';
+    let name = '';
+
+    // The account's own identity is the first entry when the server sent any.
+    if (Array.isArray(identities) && identities.length > 0) {
+        email = pick(identities[0], ['email', 'Email'], '');
+        name = pick(identities[0], ['name', 'Name'], '');
+    }
+    // Otherwise fall back to the address AppData reports for the session.
+    if (email === '') {
+        email = pick(settings_get('System') || {}, ['Email', 'email'], '');
+    }
+    if (email === '') {
+        email = settings_get('Email') === null ? '' : settings_get('Email');
+    }
+    if (typeof email !== 'string' || email === '') {
+        return null;
+    }
+    return { email: email, from: name === '' ? email : '"' + name + '" <' + email + '>' };
+}
+
+/*
+ * base_url() -> "https://host/?/" for this install
+ */
+function base_url() {
+    return location.origin + location.pathname.replace(/\/+$/, '') + '/?/';
+}
+
+/*
+ * b64_url(text) -> URL-safe base64 of text, unpadded, as SnappyMail encodes raw keys
+ */
+function b64_url(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/*
+ * unwrap(action, data) -> data.Result, or throws with what the server said instead
+ */
+function unwrap(action, data) {
+    if (typeof data !== 'object' || data === null) {
+        throw new Error(action + ': no response');
+    }
+    if (data.Result === undefined || data.Result === null || data.Result === false) {
+        throw new Error(action + ': refused (ErrorCode ' + data.ErrorCode + ')');
     }
     return data.Result;
 }
 
-/* Newest INBOX messages as [{ uid, subject, from }], highest uid first. */
-async function list_recent() {
-    const res = await call(CONFIG.ACTION_LIST, {
-        Folder: CONFIG.FOLDER,
-        Offset: 0,
-        Limit: CONFIG.SCAN_LIMIT,
-        Search: '',
-        UseThreads: 0,
-    });
-    const rows = res['@Collection'] || res.MessageList || res.Collection || [];
-    return rows.map((m) => ({
-        uid: parseInt(m.Uid, 10),
-        subject: m.Subject || '(no subject)',
-        from: (m.From && m.From[0] && m.From[0].Email) || '',
-    })).filter((m) => Number.isFinite(m.uid));
-}
-
-/* Full text of one message, for the forwarded body. */
-async function fetch_message(uid) {
-    const res = await call(CONFIG.ACTION_MESSAGE, { Folder: CONFIG.FOLDER, Uid: String(uid) });
-    return {
-        subject: res.Subject || '(no subject)',
-        fromEmail: (res.From && res.From[0] && res.From[0].Email) || '',
-        fromName: (res.From && res.From[0] && res.From[0].DisplayName) || '',
-        date: res.DateTimeStampInUTC ? new Date(res.DateTimeStampInUTC * 1000).toUTCString() : '',
-        text: res.Plain || strip_html(res.Html || ''),
-    };
-}
-
-function strip_html(html) {
-    const d = document.createElement('div');
-    d.innerHTML = html;
-    return (d.textContent || '').trim();
+/*
+ * rpc_post(action, params) -> Promise<Result> for an action that takes a JSON body
+ */
+async function rpc_post(action, params) {
+    if (!logged_in()) {
+        throw new Error('not signed in');
+    }
+    const body = { Action: action };
+    const keys = Object.keys(params);
+    for (let i = 0; i < keys.length; i++) {
+        body[keys[i]] = params[keys[i]];
+    }
+    const data = await window.rl.fetchJSON(base_url() + 'Json/&q[]=/0/', {}, body);
+    return unwrap(action, data);
 }
 
 /*
- * Forward one message as a new plain-text mail to FORWARD_TO.
+ * list_recent() -> Promise<struct row[]> newest INBOX messages
  *
- * NOTE: this is the one call that needs confirming against your server. The field set
- * below is the stock SnappyMail SendMessage shape; if sending errors, capture a real
- * forward from the webmail (see README notes) and adjust these keys.
+ * struct row { uid: number; subject: string; from: string; }
  */
-async function forward(msg) {
-    const header =
-        '---------- Forwarded message ----------\n' +
-        'From: ' + (msg.fromName ? msg.fromName + ' <' + msg.fromEmail + '>' : msg.fromEmail) + '\n' +
-        'Date: ' + msg.date + '\n' +
-        'Subject: ' + msg.subject + '\n\n';
+async function list_recent() {
+    const result = await rpc_post('MessageList', {
+        folder: CONFIG.folder,
+        offset: 0,
+        limit: CONFIG.scan_limit,
+        search: '',
+        sort: '',
+        uidNext: 0,
+        useThreads: 0
+    });
+    const collection = pick(result, ['@Collection', 'Collection', 'MessageList'], []);
+    const rows = [];
+    if (!Array.isArray(collection)) {
+        return rows;
+    }
+    for (let i = 0; i < collection.length; i++) {
+        const item = collection[i];
+        const uid = parseInt(pick(item, ['Uid', 'uid'], '0'), 10);
+        if (Number.isFinite(uid) && uid > 0) {
+            rows.push({
+                uid: uid,
+                subject: pick(item, ['Subject', 'subject'], '(no subject)'),
+                from: sender_of(item)
+            });
+        }
+    }
+    return rows;
+}
 
-    return call(CONFIG.ACTION_SEND, {
-        IdentityID: '',
-        MessageFolder: '',
-        MessageUid: '',
-        SaveFolder: '',
-        From: account_email(),
-        To: CONFIG.FORWARD_TO,
-        Cc: '',
-        Bcc: '',
-        ReplyTo: '',
-        Subject: 'Fwd: ' + msg.subject,
-        Text: header + msg.text,
-        Html: '',
-        Attachments: {},
-        Dsn: 0,
-        ReadReceiptRequest: 0,
+/*
+ * sender_of(item) -> "name <email>" for a list row or message, '' when absent
+ */
+function sender_of(item) {
+    const from = pick(item, ['From', 'from'], null);
+    let first = null;
+    if (Array.isArray(from) && from.length > 0) {
+        first = from[0];
+    } else if (typeof from === 'object' && from !== null) {
+        const collection = pick(from, ['@Collection', 'Collection'], null);
+        if (Array.isArray(collection) && collection.length > 0) {
+            first = collection[0];
+        }
+    }
+    if (first === null) {
+        return '';
+    }
+    const email = pick(first, ['Email', 'email'], '');
+    const name = pick(first, ['DisplayName', 'Name', 'name'], '');
+    return name === '' ? email : name + ' <' + email + '>';
+}
+
+/*
+ * fetch_message(uid) -> Promise<struct mail> the full message behind a list row
+ *
+ * struct mail { uid: number; subject, from, date, plain: string; }
+ */
+async function fetch_message(uid) {
+    if (!logged_in()) {
+        throw new Error('not signed in');
+    }
+    const raw = b64_url(JSON.stringify([CONFIG.folder, uid, 0, account_hash()]));
+    const url = base_url() + 'Json/&q[]=/0/Message/&q[]=/' + raw;
+    const data = await window.rl.fetchJSON(url);
+    const result = unwrap('Message', data);
+    const stamp = parseInt(pick(result, ['DateTimeStampInUTC', 'dateTimeStampInUTC'], '0'), 10);
+    let plain = pick(result, ['Plain', 'plain'], '');
+    if (plain === '') {
+        plain = html_to_text(pick(result, ['Html', 'html'], ''));
+    }
+    return {
+        uid: uid,
+        subject: pick(result, ['Subject', 'subject'], '(no subject)'),
+        from: sender_of(result),
+        date: Number.isFinite(stamp) && stamp > 0 ? new Date(stamp * 1000).toUTCString() : '',
+        plain: plain
+    };
+}
+
+/*
+ * html_to_text(html) -> the readable text inside an HTML body
+ */
+function html_to_text(html) {
+    const box = document.createElement('div');
+    box.innerHTML = html;
+    const text = box.textContent;
+    return typeof text === 'string' ? text.trim() : '';
+}
+
+/*
+ * forward_message(mail) -> Promise sending mail on to CONFIG.forward_to
+ *
+ * Sent as a fresh plain-text message quoting the original, not a MIME forward, so
+ * attachments stay behind in the company inbox and are not copied out.
+ */
+async function forward_message(mail) {
+    const who = identity();
+    if (who === null) {
+        throw new Error('cannot tell which address to send as');
+    }
+    const header = '---------- Forwarded message ----------\n'
+        + 'From: ' + mail.from + '\n'
+        + 'Date: ' + mail.date + '\n'
+        + 'Subject: ' + mail.subject + '\n\n';
+    return rpc_post('SendMessage', {
+        identityID: '',
+        messageFolder: '',
+        messageUid: 0,
+        saveFolder: CONFIG.save_folder,
+        draftInfo: null,
+        from: who.from,
+        to: CONFIG.forward_to,
+        cc: '',
+        bcc: '',
+        replyTo: '',
+        subject: 'Fwd: ' + mail.subject,
+        plain: header + mail.plain,
+        html: '',
+        inReplyTo: '',
+        references: '',
+        attachments: null,
+        dsn: 0,
+        requireTLS: 0,
+        readReceiptRequest: 0,
+        markAsImportant: 0
     });
 }
 
-/* --- state, keyed per account --- */
-function key() { return 'mf_lastuid::' + account_email(); }
-async function get_last_uid() { return parseInt(await GM_getValue(key(), '0'), 10) || 0; }
-async function set_last_uid(uid) { await GM_setValue(key(), String(uid)); }
+/*
+ * state_key() -> the storage key holding the last handled UID for this account
+ */
+function state_key() {
+    return 'mailforward.last_uid.' + account_hash();
+}
 
-/* One pass. */
-async function tick() {
-    if (!snappymail_ready()) { return; }
-    let recent;
-    try {
-        recent = await list_recent();
-    } catch (e) {
-        LOG('could not list mail:', e.message);
-        return;
-    }
-    if (recent.length === 0) { LOG('inbox empty / nothing returned'); return; }
+/*
+ * get_last_uid() -> Promise<number> last UID handled, 0 when this account is new here
+ */
+async function get_last_uid() {
+    const stored = parseInt(await GM_getValue(state_key(), '0'), 10);
+    return Number.isFinite(stored) ? stored : 0;
+}
 
-    const lastUid = await get_last_uid();
+/*
+ * set_last_uid(uid) -> Promise storing uid as handled
+ */
+async function set_last_uid(uid) {
+    await GM_setValue(state_key(), String(uid));
+}
 
-    // First ever run on this account: set the baseline, don't forward the backlog.
-    if (lastUid === 0) {
-        const maxUid = Math.max(...recent.map((m) => m.uid));
-        await set_last_uid(maxUid);
-        LOG('baseline set at uid', maxUid, '— only mail newer than this will be forwarded.');
-        return;
-    }
-
-    const fresh = recent.filter((m) => m.uid > lastUid).sort((a, b) => a.uid - b.uid);
-    if (fresh.length === 0) { LOG('no new mail'); return; }
-
-    LOG((CONFIG.DRY_RUN ? '[DRY RUN] would forward ' : 'forwarding ') + fresh.length + ' message(s):');
-    for (const m of fresh) {
-        LOG('  uid', m.uid, '·', m.from, '·', m.subject);
-        if (CONFIG.DRY_RUN) { await set_last_uid(m.uid); continue; }
-        try {
-            const full = await fetch_message(m.uid);
-            await forward(full);
-            await set_last_uid(m.uid);
-            LOG('  -> forwarded to', CONFIG.FORWARD_TO);
-        } catch (e) {
-            LOG('  -> FAILED on uid', m.uid, ':', e.message, '(stopping this pass)');
-            break; // leave last_uid before this one so it retries next hour, no skips
+/*
+ * newer_than(rows, uid) -> rows above uid, oldest first
+ */
+function newer_than(rows, uid) {
+    const fresh = [];
+    for (let i = 0; i < rows.length; i++) {
+        if (rows[i].uid > uid) {
+            fresh.push(rows[i]);
         }
     }
-    if (!CONFIG.DRY_RUN) {
-        try { GM_notification({ title: 'mailForward', text: 'Forwarded ' + fresh.length + ' message(s)' }); } catch (e) {}
+    fresh.sort(function (a, b) {
+        return a.uid - b.uid;
+    });
+    return fresh;
+}
+
+/*
+ * highest_uid(rows) -> the largest uid in rows, 0 when empty
+ */
+function highest_uid(rows) {
+    let top = 0;
+    for (let i = 0; i < rows.length; i++) {
+        if (rows[i].uid > top) {
+            top = rows[i].uid;
+        }
+    }
+    return top;
+}
+
+/*
+ * tick() -> Promise, one pass. Returns straight away unless a live session is present.
+ */
+async function tick() {
+    if (!logged_in()) {
+        log('not signed in — nothing done');
+        return;
+    }
+    last_run_at = Date.now();
+
+    let rows;
+    try {
+        rows = await list_recent();
+    } catch (e) {
+        log('could not read the inbox:', e.message);
+        return;
+    }
+    if (rows.length === 0) {
+        log('inbox returned nothing');
+        return;
+    }
+
+    const last_uid = await get_last_uid();
+
+    // First pass for this account: remember where we came in, forward no backlog.
+    if (last_uid === 0) {
+        const top = highest_uid(rows);
+        await set_last_uid(top);
+        log('starting point set at uid', top, '— only mail after this is forwarded');
+        return;
+    }
+
+    const fresh = newer_than(rows, last_uid);
+    if (fresh.length === 0) {
+        log('no new mail');
+        return;
+    }
+
+    log((CONFIG.dry_run ? 'dry run, would forward ' : 'forwarding ') + fresh.length + ' message(s)');
+    for (let i = 0; i < fresh.length; i++) {
+        const row = fresh[i];
+        log('  uid', row.uid, '·', row.from, '·', row.subject);
+        if (CONFIG.dry_run) {
+            await set_last_uid(row.uid);
+            continue;
+        }
+        if (!logged_in()) {
+            log('  session ended mid-pass — stopping, will resume next check');
+            return;
+        }
+        try {
+            const mail = await fetch_message(row.uid);
+            await forward_message(mail);
+            await set_last_uid(row.uid);
+            log('  sent to', CONFIG.forward_to);
+        } catch (e) {
+            // Leave last_uid below this one so the next pass retries it instead of skipping.
+            log('  failed on uid', row.uid + ':', e.message, '— stopping this pass');
+            return;
+        }
     }
 }
 
+/*
+ * on_focus() -> runs a pass when the tab is focused and the last one was a while ago
+ */
+function on_focus() {
+    if (document.visibilityState !== 'visible') {
+        return;
+    }
+    if (Date.now() - last_run_at < CONFIG.focus_min_gap_ms) {
+        return;
+    }
+    tick();
+}
+
+/*
+ * start() -> wires the timers and menu commands, once SnappyMail is on the page
+ */
 function start() {
-    if (!snappymail_ready()) { return; } // not a SnappyMail page
-    LOG('active on', account_email(), '· mode:', CONFIG.DRY_RUN ? 'DRY RUN' : 'LIVE', '· every', CONFIG.CHECK_EVERY_MS / 60000, 'min');
+    if (!app_ready()) {
+        return;
+    }
+    log('loaded ·', CONFIG.dry_run ? 'DRY RUN' : 'LIVE', '· every',
+        Math.round(CONFIG.check_every_ms / 60000), 'min · to', CONFIG.forward_to);
+    if (!logged_in()) {
+        log('no session in this tab yet — it will start once you are signed in');
+    }
     try {
-        GM_registerMenuCommand('mailForward: check now', () => tick());
-        GM_registerMenuCommand('mailForward: reset baseline', async () => { await set_last_uid(0); LOG('baseline cleared; next check re-baselines.'); });
-    } catch (e) {}
-    setTimeout(tick, 8000);            // once shortly after load
-    setInterval(tick, CONFIG.CHECK_EVERY_MS); // then hourly
+        GM_registerMenuCommand('mailForward: check now', function () {
+            tick();
+        });
+        GM_registerMenuCommand('mailForward: forget starting point', async function () {
+            await set_last_uid(0);
+            log('starting point cleared — the next check sets a new one');
+        });
+    } catch (e) {
+        log('menu commands unavailable:', e.message);
+    }
+    setTimeout(tick, CONFIG.first_pass_delay_ms);
+    setInterval(tick, CONFIG.check_every_ms);
+    document.addEventListener('visibilitychange', on_focus);
 }
 
 start();
