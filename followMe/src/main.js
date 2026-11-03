@@ -48,6 +48,7 @@ async function main() {
     }
     if (panel.prefs.pinned) {
         side_start();
+        await side_ready();
     }
     tab_render();
     if (panel.prefs.open) {

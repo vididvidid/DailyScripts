@@ -99,6 +99,23 @@ function side_start() {
 }
 
 /*
+ * side_ready() -> Promise; settles once Moss has said whether its side panel shows the
+ *   panel (an older Moss without side.ready: after a short wait). Until then a pinned
+ *   panel draws nothing on the page, or it flashes there on every page load.
+ */
+function side_ready() {
+    if (panel.side === null) {
+        return Promise.resolve();
+    }
+    if (panel.side.ready) {
+        return panel.side.ready;
+    }
+    return new Promise(function (resolve) {
+        setTimeout(resolve, 1500);
+    });
+}
+
+/*
  * side_on_show(shown) — the side panel started or stopped showing the panel
  */
 function side_on_show(shown) {
