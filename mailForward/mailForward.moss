@@ -5,7 +5,7 @@
 // description: Forward new SnappyMail inbox mail to a personal address, on an hourly check, from your own logged-in browser session. For a company webmail that has no server-side filters.
 // author:      vididvidid
 // homepage:    https://github.com/vididvidid/DailyScripts/tree/main/mailForward
-// match:       *://*/*
+// match:       https://mail.sthithaquantum.com/*
 // noframes:
 // run-at:      document-idle
 // grant:
@@ -74,11 +74,12 @@ function account_email() {
     }
 }
 
-/* Build the JSON-RPC URL the same way SnappyMail's own boot code does. */
+/*
+ * Build the JSON-RPC endpoint. Confirmed from a live capture on this server:
+ *   POST https://mail.sthithaquantum.com/?/Json/&q[]=/0/
+ */
 function rpc_url() {
-    const base = location.pathname.replace(/\/+$/, '') + '/?/';
-    const rand = Math.random().toString().slice(2);
-    return base + 'Json/&q[]=/0/' + rand + '/';
+    return location.origin + '/?/Json/&q[]=/0/';
 }
 
 /*
