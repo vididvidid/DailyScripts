@@ -242,11 +242,11 @@ async function list_recent() {
     }
     for (let i = 0; i < collection.length; i++) {
         const item = collection[i];
-        const uid = parseInt(pick(item, ['Uid', 'uid'], '0'), 10);
+        const uid = parseInt(pick(item, ['uid', 'Uid'], '0'), 10);
         if (Number.isFinite(uid) && uid > 0) {
             rows.push({
                 uid: uid,
-                subject: pick(item, ['Subject', 'subject'], '(no subject)'),
+                subject: pick(item, ['subject', 'Subject'], '(no subject)'),
                 from: sender_of(item)
             });
         }
@@ -258,7 +258,7 @@ async function list_recent() {
  * sender_of(item) -> "name <email>" for a list row or message, '' when absent
  */
 function sender_of(item) {
-    const from = pick(item, ['From', 'from'], null);
+    const from = pick(item, ['from', 'From'], null);
     let first = null;
     if (Array.isArray(from) && from.length > 0) {
         first = from[0];
@@ -271,8 +271,8 @@ function sender_of(item) {
     if (first === null) {
         return '';
     }
-    const email = pick(first, ['Email', 'email'], '');
-    const name = pick(first, ['DisplayName', 'Name', 'name'], '');
+    const email = pick(first, ['email', 'Email'], '');
+    const name = pick(first, ['name', 'DisplayName', 'Name'], '');
     return name === '' ? email : name + ' <' + email + '>';
 }
 
@@ -289,14 +289,14 @@ async function fetch_message(uid) {
     const url = base_url() + 'Json/&q[]=/0/Message/&q[]=/' + raw;
     const data = await window.rl.fetchJSON(url);
     const result = unwrap('Message', data);
-    const stamp = parseInt(pick(result, ['DateTimeStampInUTC', 'dateTimeStampInUTC'], '0'), 10);
-    let plain = pick(result, ['Plain', 'plain'], '');
+    const stamp = parseInt(pick(result, ['dateTimestamp', 'DateTimeStampInUTC'], '0'), 10);
+    let plain = pick(result, ['plain', 'Plain'], '');
     if (plain === '') {
-        plain = html_to_text(pick(result, ['Html', 'html'], ''));
+        plain = html_to_text(pick(result, ['html', 'Html'], ''));
     }
     return {
         uid: uid,
-        subject: pick(result, ['Subject', 'subject'], '(no subject)'),
+        subject: pick(result, ['subject', 'Subject'], '(no subject)'),
         from: sender_of(result),
         date: Number.isFinite(stamp) && stamp > 0 ? new Date(stamp * 1000).toUTCString() : '',
         plain: plain
