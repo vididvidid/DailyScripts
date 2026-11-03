@@ -43,6 +43,10 @@ const CONFIG = {
     // Where new mail is sent on to.
     forward_to: 'vididvidid@gmail.com',
 
+    // Who the forward is sent as. This server does not put Identities in AppData, so
+    // it is set here rather than detected. Must be an address this account may send as.
+    send_as: '"Yash Kumar Kasaudhan" <yash@sthithaquantum.com>',
+
     // Mailbox to watch, and how many recent messages to look at each pass.
     folder: 'INBOX',
     scan_limit: 20,
@@ -147,31 +151,25 @@ function pick(object, names, fallback) {
 }
 
 /*
- * identity() -> struct { email, from } for the signed-in account, or null when unknown
+ * sender() -> the From value to send as, or '' when it cannot be determined
  *
- * struct identity { email: string; from: string; }   from is "Name <email>" when a name is known
+ * CONFIG.send_as wins. Only when that is blank does it try AppData, which on this
+ * server carries no Identities list, so the config value is the normal path.
  */
-function identity() {
+function sender() {
+    if (CONFIG.send_as !== '') {
+        return CONFIG.send_as;
+    }
     const identities = settings_get('Identities');
-    let email = '';
-    let name = '';
-
-    // The account's own identity is the first entry when the server sent any.
     if (Array.isArray(identities) && identities.length > 0) {
-        email = pick(identities[0], ['email', 'Email'], '');
-        name = pick(identities[0], ['name', 'Name'], '');
+        const email = pick(identities[0], ['email', 'Email'], '');
+        const name = pick(identities[0], ['name', 'Name'], '');
+        if (email !== '') {
+            return name === '' ? email : '"' + name + '" <' + email + '>';
+        }
     }
-    // Otherwise fall back to the address AppData reports for the session.
-    if (email === '') {
-        email = pick(settings_get('System') || {}, ['Email', 'email'], '');
-    }
-    if (email === '') {
-        email = settings_get('Email') === null ? '' : settings_get('Email');
-    }
-    if (typeof email !== 'string' || email === '') {
-        return null;
-    }
-    return { email: email, from: name === '' ? email : '"' + name + '" <' + email + '>' };
+    const system_email = pick(settings_get('System') || {}, ['Email', 'email'], '');
+    return typeof system_email === 'string' ? system_email : '';
 }
 
 /*
@@ -322,9 +320,9 @@ function html_to_text(html) {
  * attachments stay behind in the company inbox and are not copied out.
  */
 async function forward_message(mail) {
-    const who = identity();
-    if (who === null) {
-        throw new Error('cannot tell which address to send as');
+    const from = sender();
+    if (from === '') {
+        throw new Error('no send_as address set in CONFIG');
     }
     const header = '---------- Forwarded message ----------\n'
         + 'From: ' + mail.from + '\n'
@@ -336,7 +334,7 @@ async function forward_message(mail) {
         messageUid: 0,
         saveFolder: CONFIG.save_folder,
         draftInfo: null,
-        from: who.from,
+        from: from,
         to: CONFIG.forward_to,
         cc: '',
         bcc: '',
@@ -489,7 +487,8 @@ function start() {
         return;
     }
     log('loaded ·', CONFIG.dry_run ? 'DRY RUN' : 'LIVE', '· every',
-        Math.round(CONFIG.check_every_ms / 60000), 'min · to', CONFIG.forward_to);
+        Math.round(CONFIG.check_every_ms / 60000), 'min · from',
+        sender() === '' ? '(NOT SET)' : sender(), '· to', CONFIG.forward_to);
     if (!logged_in()) {
         log('no session in this tab yet — it will start once you are signed in');
     }
